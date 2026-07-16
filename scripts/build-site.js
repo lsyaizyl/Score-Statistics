@@ -4,6 +4,7 @@ import path from "node:path";
 const projectRoot = process.cwd();
 const distDir = path.join(projectRoot, "dist");
 const serverDir = path.join(distDir, "server");
+const openaiDistDir = path.join(distDir, ".openai");
 const staticAssets = {
   "index.html": await fs.readFile(path.join(projectRoot, "public", "index.html"), "utf8"),
   "styles.css": await fs.readFile(path.join(projectRoot, "public", "styles.css"), "utf8"),
@@ -19,7 +20,9 @@ const generatedWorker = workerSource.replace(
 
 await fs.rm(distDir, { recursive: true, force: true });
 await fs.mkdir(serverDir, { recursive: true });
+await fs.mkdir(openaiDistDir, { recursive: true });
 await fs.writeFile(path.join(serverDir, "index.js"), generatedWorker);
 await fs.copyFile(path.join(projectRoot, "src", "core.js"), path.join(serverDir, "core.js"));
+await fs.copyFile(path.join(projectRoot, ".openai", "hosting.json"), path.join(openaiDistDir, "hosting.json"));
 
 console.log(`Built Sites worker at ${path.join(serverDir, "index.js")}`);
