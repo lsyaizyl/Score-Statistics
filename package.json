@@ -1,0 +1,11 @@
+{
+  "name": "road-engineering-score-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-site.js",
+    "test": "node --test",
+    "start": "node src/server.js"
+  }
+}
