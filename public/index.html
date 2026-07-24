@@ -10,9 +10,40 @@
     <div id="app" class="app-shell">
       <main class="boot-panel">
         <div class="loader"></div>
-        <p>正在加载工具...</p>
+        <p id="bootStatus">正在加载工具...</p>
       </main>
     </div>
+    <script>
+      (() => {
+        const showBootError = (message) => {
+          const status = document.querySelector("#bootStatus");
+          const loader = document.querySelector(".loader");
+          if (!status || !document.querySelector(".boot-panel")) return;
+          if (loader) loader.remove();
+          status.textContent = message;
+          status.style.color = "#a33a32";
+        };
+
+        window.addEventListener("error", (event) => {
+          const target = event.target;
+          if (target?.tagName === "SCRIPT") {
+            showBootError("入口脚本加载失败，请检查 Cloudflare 部署入口和静态资源路径。");
+            return;
+          }
+          if (event.message) {
+            showBootError(`工具启动失败：${event.message}`);
+          }
+        }, true);
+
+        window.addEventListener("unhandledrejection", (event) => {
+          showBootError(`工具启动失败：${event.reason?.message || event.reason || "未知错误"}`);
+        });
+
+        window.setTimeout(() => {
+          showBootError("加载超时，请检查部署命令是否使用 npx wrangler deploy，且入口为 dist/server/index.js。");
+        }, 8000);
+      })();
+    </script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
