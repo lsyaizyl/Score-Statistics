@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   ROAD_TASKS,
   allowedScoresForTask,
+  buildOfficialScoreSheets,
   createManualEntry,
   getEntryWorkflowStatus,
   mergeRosterEntries,
@@ -13,7 +14,9 @@ import {
   calculateTeam,
   rankTeams,
   suggestAwardCounts,
+  splitRosterNames,
   assignAwards,
+  secondsToOfficialTime,
 } from "../src/core.js";
 
 function completeRound(seconds, scores = {}) {
@@ -70,6 +73,59 @@ test("validates fixed roster columns and reports missing, duplicate, empty, and 
 
   const missing = validateRosterRows([{ 组别: "小学组", 队伍名称: "A" }]);
   assert.deepEqual(missing.missingColumns, ["学校", "选手A", "选手B", "指导教师"]);
+});
+
+test("normalizes province roster rows with city, students, coach contact, and inferred group", () => {
+  assert.deepEqual(splitRosterNames("陈彦钧、李亚霖"), ["陈彦钧", "李亚霖"]);
+
+  const result = validateRosterRows([
+    {
+      __sheetName: "队伍抽签名单-小学",
+      __rowNumber: 3,
+      序号: 1,
+      系统编号: "D2026068",
+      地市: "珠海市",
+      学校全称: "珠海市香洲区实验学校",
+      参赛选手: "陈彦钧、李亚霖",
+      教练员: "王静芬",
+      教练员联系方式: "13392995523",
+      抽签号: "A01",
+    },
+  ]);
+
+  assert.deepEqual(result.missingColumns, []);
+  assert.deepEqual(result.issues, []);
+  assert.equal(result.validRows.length, 1);
+  assert.equal(result.validRows[0].group, "小学组");
+  assert.equal(result.validRows[0].number, "A01");
+  assert.equal(result.validRows[0].systemId, "A01");
+  assert.equal(result.validRows[0].city, "珠海市");
+  assert.equal(result.validRows[0].school, "珠海市香洲区实验学校");
+  assert.equal(result.validRows[0].studentA, "陈彦钧");
+  assert.equal(result.validRows[0].studentB, "李亚霖");
+  assert.equal(result.validRows[0].coach, "王静芬");
+  assert.equal(result.validRows[0].coachPhone, "13392995523");
+  assert.equal(result.validRows[0].teamName, "珠海市香洲区实验学校（陈彦钧、李亚霖）");
+});
+
+test("keeps province roster number empty when draw number is empty", () => {
+  const result = validateRosterRows([
+    {
+      __sheetName: "队伍抽签名单-小学",
+      序号: 1,
+      系统编号: "D2026068",
+      地市: "珠海市",
+      学校全称: "珠海市香洲区实验学校",
+      参赛选手: "陈彦钧、李亚霖",
+      教练员: "王静芬",
+      教练员联系方式: "13392995523",
+      抽签号: "",
+    },
+  ]);
+
+  assert.equal(result.validRows.length, 1);
+  assert.equal(result.validRows[0].number, "");
+  assert.equal(result.validRows[0].systemId, "");
 });
 
 test("calculates round totals, total time, and elimination status from per-task scores", () => {
@@ -159,6 +215,51 @@ test("suggests adjustable award counts and assigns awards only to non-eliminated
     ["队伍4", "三等奖"],
     ["淘汰队", "淘汰"],
   ]);
+});
+
+test("builds official score sheet rows with draw numbers and template system ids", () => {
+  const entry = calculateTeam({
+    id: "小学组-D2026001",
+    group: "小学组",
+    serial: "1",
+    number: "G01",
+    teamName: "甲校（甲、乙）",
+    city: "珠海市",
+    school: "甲校",
+    rawStudents: "甲、乙",
+    coach: "丙",
+    robotWeight: 1.25,
+    rounds: [
+      completeRound(82, { tunnel: 50, autoCharging: 50 }),
+      completeRound(11, { tunnel: 50 }),
+    ],
+  });
+  const sheets = buildOfficialScoreSheets(
+    [entry],
+    { 小学组: { first: 1, second: 0, third: 0 } },
+    new Map([[
+      "小学组成绩表",
+      [
+        ["旧标题"],
+        ["出场\n序号", "系统编号", "地市", "学校名称", "参赛选手", "教练员"],
+        ["", "D2026001", "珠海市", "甲校", "甲、乙", "丙"],
+      ],
+    ]]),
+  );
+  const row = sheets.find((sheet) => sheet.name === "小学组成绩表").rows[2];
+
+  assert.equal(secondsToOfficialTime(82), 12200);
+  assert.equal(row[0], "G01");
+  assert.equal(row[1], "D2026001");
+  assert.equal(row[6], 100);
+  assert.equal(row[7], 12200);
+  assert.equal(row[8], 50);
+  assert.equal(row[9], 1100);
+  assert.equal(row[10], 1.25);
+  assert.equal(row[11], 150);
+  assert.equal(row[12], 13300);
+  assert.equal(row[13], 1);
+  assert.equal(row[14], "一等奖");
 });
 
 test("creates a manual team from the minimum fields and rejects duplicates within a group", () => {

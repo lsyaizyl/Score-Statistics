@@ -1,9 +1,13 @@
 import {
   GROUPS,
-  REQUIRED_ROSTER_COLUMNS,
+  OFFICIAL_SCORE_HEADERS,
+  OFFICIAL_SCORE_OUTPUT_FILENAME,
+  ROSTER_TEMPLATE_COLUMNS,
   ROAD_TASKS,
   buildGroupResults,
+  buildOfficialScoreSheets,
   createEntryFromRoster,
+  normalizeText,
   validateRosterRows,
 } from "./core.js";
 
@@ -16,11 +20,14 @@ const summaryHeaders = [
   "组别",
   "排名",
   "奖项",
+  "抽签号",
+  "地市",
   "队伍名称",
   "学校",
   "选手A",
   "选手B",
   "指导教师",
+  "教练员联系方式",
   "第一轮总分",
   "第二轮总分",
   "总成绩",
@@ -29,6 +36,9 @@ const summaryHeaders = [
   "总用时(秒)",
   "机器人重量(kg)",
 ];
+
+const rosterSheetPattern = /队伍抽签名单|参赛名单|名单/i;
+const nonRosterSheetPattern = /成绩表|物料|贴桌面|赛板/i;
 
 export default {
   async fetch(request) {
@@ -45,7 +55,7 @@ export async function handleRequest(request) {
     }
 
     if (request.method === "GET" && url.pathname === "/api/template") {
-      const bytes = createWorkbook(templateSheets());
+      const bytes = await createWorkbook(templateSheets());
       return xlsxResponse(bytes, "道路工程参赛名单模板.xlsx");
     }
 
@@ -55,11 +65,14 @@ export async function handleRequest(request) {
 
     if (request.method === "POST" && url.pathname === "/api/export") {
       const payload = await readJson(request);
-      const bytes = createWorkbook(scorePackageSheets({
+      const exportPayload = {
         entries: Array.isArray(payload.entries) ? payload.entries : [],
         awardCountsByGroup: payload.awardCountsByGroup ?? {},
-      }));
-      return xlsxResponse(bytes, `道路工程成绩包-${dateStamp()}.xlsx`);
+      };
+      const bytes = payload.sourceWorkbookBase64
+        ? await patchOfficialWorkbook(base64ToBytes(stripDataUrlPrefix(payload.sourceWorkbookBase64)), exportPayload)
+        : await createWorkbook(officialScoreWorkbookSheets(exportPayload));
+      return xlsxResponse(bytes, OFFICIAL_SCORE_OUTPUT_FILENAME);
     }
 
     if (request.method === "GET") {
@@ -80,10 +93,12 @@ async function importRosterResponse(request) {
 
   try {
     const bytes = base64ToBytes(stripDataUrlPrefix(payload.base64));
-    const matrix = await firstWorksheetMatrix(bytes);
-    const validation = validateRosterRows(rowsFromMatrix(matrix));
+    const sheets = await workbookMatrices(bytes);
+    const rosterRows = rosterRowsFromSheets(sheets);
+    const validation = validateRosterRows(rosterRows);
     return jsonResponse({
       ...validation,
+      scannedSheets: sheets.map((sheet) => ({ name: sheet.name, rows: rowsFromMatrix(sheet.matrix, sheet.name).length })),
       validRows: validation.validRows.map(createEntryFromRoster),
     });
   } catch (error) {
@@ -111,22 +126,22 @@ function templateSheets() {
     {
       name: "名单模板",
       rows: [
-        [...REQUIRED_ROSTER_COLUMNS, "编号", "备注"],
-        ["小学组", "示例小学队", "示例小学", "学生A", "学生B", "指导教师", "1", ""],
-        ["初中组", "示例初中队", "示例初中", "学生A", "学生B", "指导教师", "2", ""],
-        ["高中组", "示例高中队", "示例高中", "学生A", "学生B", "指导教师", "3", ""],
+        ROSTER_TEMPLATE_COLUMNS,
+        ["小学组", "1", "珠海市", "示例小学", "学生A、学生B", "指导教师", "13800000000", "A01", "示例小学（学生A、学生B）", ""],
+        ["初中组", "2", "广州市", "示例初中", "学生A、学生B", "指导教师", "13900000000", "B01", "示例初中（学生A、学生B）", ""],
+        ["高中组", "3", "深圳市", "示例高中", "学生A、学生B", "指导教师", "13700000000", "C01", "示例高中（学生A、学生B）", ""],
       ],
     },
     {
       name: "填写说明",
       rows: [
         ["道路工程参赛名单模板说明", ""],
-        ["必填列", REQUIRED_ROSTER_COLUMNS.join("、")],
+        ["必填列", "序号、地市、学校全称、参赛选手、教练员、教练员联系方式"],
         ["组别取值", GROUPS.join("、")],
-        ["队伍名称", "同一组别内不应重复。"],
-        ["编号", "可选，用于保留赛场编号或出场顺序。"],
-        ["备注", "可选，用于临时说明。"],
-        ["导入方式", "保留第一行表头，从第二行开始填写队伍。"],
+        ["队伍名称", "可选；留空时会自动用“学校全称（参赛选手）”生成。"],
+        ["抽签号", "可选；导入后作为页面和导出表中的抽签号，空白时保持空白。"],
+        ["参赛选手", "两名选手可用“、”或逗号分隔，会自动拆分为选手A和选手B。"],
+        ["导入方式", "支持直接导入含“队伍抽签名单-小学/初中/高中”工作表的成绩表。"],
       ],
     },
   ];
@@ -159,10 +174,12 @@ function scorePackageSheets({ entries, awardCountsByGroup }) {
       name: `${group}公示表`,
       rows: [
         [`道路工程${group}成绩公示表`],
-        ["排名", "奖项", "队伍名称", "学校", "第一轮总分", "第二轮总分", "总成绩", "总用时(秒)", "备注"],
+        ["排名", "奖项", "抽签号", "地市", "队伍名称", "学校", "第一轮总分", "第二轮总分", "总成绩", "总用时(秒)", "备注"],
         ...result.teams.map((team) => [
           team.rank ?? "",
           team.award ?? "",
+          team.number ?? "",
+          team.city ?? "",
           team.teamName,
           team.school,
           completedValue(team, team.roundTotals?.[0]),
@@ -177,10 +194,12 @@ function scorePackageSheets({ entries, awardCountsByGroup }) {
       name: `${group}签名表`,
       rows: [
         [`道路工程${group}成绩签名表`],
-        ["排名", "奖项", "队伍名称", "学校", "总成绩", "总用时(秒)", "裁判签名", "裁判长签名"],
+        ["排名", "奖项", "抽签号", "地市", "队伍名称", "学校", "总成绩", "总用时(秒)", "裁判签名", "裁判长签名"],
         ...result.teams.map((team) => [
           team.rank ?? "",
           team.award ?? "",
+          team.number ?? "",
+          team.city ?? "",
           team.teamName,
           team.school,
           completedValue(team, team.totalScore),
@@ -188,8 +207,8 @@ function scorePackageSheets({ entries, awardCountsByGroup }) {
           "",
           "",
         ]),
-        ["", "", "", "", "", "", "裁判长确认：", ""],
-        ["", "", "", "", "", "", "日期：", ""],
+        ["", "", "", "", "", "", "", "", "裁判长确认：", ""],
+        ["", "", "", "", "", "", "", "", "日期：", ""],
       ],
     });
   }
@@ -197,16 +216,192 @@ function scorePackageSheets({ entries, awardCountsByGroup }) {
   return sheets;
 }
 
+function officialScoreWorkbookSheets({ entries, awardCountsByGroup }) {
+  return buildOfficialScoreSheets(entries, awardCountsByGroup).map((sheet) => ({
+    name: sheet.name,
+    rows: sheet.rows,
+  }));
+}
+
+async function patchOfficialWorkbook(sourceBytes, { entries, awardCountsByGroup }) {
+  const files = await readZip(sourceBytes);
+  const workbookSheets = workbookSheetPaths(files);
+  const matrices = await workbookMatrices(sourceBytes);
+  const existingRowsBySheet = new Map(matrices.map((sheet) => [sheet.name, sheet.matrix]));
+  const scoreSheets = buildOfficialScoreSheets(entries, awardCountsByGroup, existingRowsBySheet);
+
+  for (const scoreSheet of scoreSheets) {
+    const workbookSheet = workbookSheets.find((sheet) => sheet.name === scoreSheet.name);
+    if (!workbookSheet) {
+      return createWorkbook(officialScoreWorkbookSheets({ entries, awardCountsByGroup }));
+    }
+    const originalXml = parseXmlFile(files, workbookSheet.path);
+    const patchedXml = patchWorksheetData(originalXml, scoreSheet);
+    files.set(workbookSheet.path, patchedXml);
+  }
+
+  return createZip([...files.entries()].map(([name, data]) => ({ name, data })));
+}
+
+function workbookSheetPaths(files) {
+  const workbook = parseXmlFile(files, "xl/workbook.xml");
+  const rels = parseRelationships(parseXmlFile(files, "xl/_rels/workbook.xml.rels"));
+  return tags(workbook, "sheet").flatMap((tag, index) => {
+    const attrs = parseAttributes(tag);
+    const target = rels.get(attrs["r:id"]);
+    return target ? [{ name: attrs.name || `Sheet${index + 1}`, path: normalizeWorkbookTarget(target) }] : [];
+  });
+}
+
+function patchWorksheetData(xml, scoreSheet) {
+  const rows = scoreSheet.rows;
+  const colCount = OFFICIAL_SCORE_HEADERS.length;
+  const prefix = elementPrefix(xml, "worksheet") || elementPrefix(xml, "sheetData");
+  const rowStyles = worksheetRowStyles(xml);
+  const fallbackStyles = fallbackCellStyles(rowStyles);
+  const rowXml = rows.map((row, rowIndex) => officialWorksheetRowXml(
+    row,
+    rowIndex + 1,
+    colCount,
+    rowStyles[rowIndex],
+    fallbackStyles,
+    prefix,
+  )).join("");
+  const dimension = `<${prefix}dimension ref="A1:${columnName(colCount)}${Math.max(1, rows.length)}"/>`;
+  const dimensionPattern = new RegExp(`<${qualifiedName("dimension")}\\b[^>]*(?:\\/>|>[\\s\\S]*?<\\/${qualifiedName("dimension")}>)`);
+  const withDimension = xml.match(dimensionPattern)
+    ? xml.replace(dimensionPattern, dimension)
+    : xml.replace(new RegExp(`<${qualifiedName("worksheet")}\\b[^>]*>`), (match) => `${match}${dimension}`);
+  const sheetDataPattern = new RegExp(`<${qualifiedName("sheetData")}\\b[^>]*>[\\s\\S]*?<\\/${qualifiedName("sheetData")}>`);
+  return withDimension.match(sheetDataPattern)
+    ? withDimension.replace(sheetDataPattern, `<${prefix}sheetData>${rowXml}</${prefix}sheetData>`)
+    : withDimension.replace(new RegExp(`<${qualifiedName("worksheet")}\\b[^>]*>`), (match) => `${match}<${prefix}sheetData>${rowXml}</${prefix}sheetData>`);
+}
+
+function worksheetRowStyles(xml) {
+  const rows = [];
+  for (const rowBlock of fullBlocks(xml, "row")) {
+    const rowTag = rowBlock.match(new RegExp(`^<${qualifiedName("row")}\\b[^>]*>`))?.[0] ?? "";
+    const rowAttrs = parseAttributes(rowTag);
+    const cells = new Map();
+    const cellXmls = new Map();
+    for (const cellTag of cellTags(rowBlock)) {
+      const tagEnd = cellTag.indexOf(">");
+      const attrs = parseAttributes(cellTag.slice(0, tagEnd + 1));
+      const column = attrs.r ? columnIndex(attrs.r.replace(/\d+/g, "")) + 1 : cells.size + 1;
+      cells.set(column, attrs.s ? attrs.s : "");
+      cellXmls.set(column, cellTag);
+    }
+    rows[Number(rowAttrs.r || rows.length + 1) - 1] = { attrs: rowAttrs, cells, cellXmls };
+  }
+  return rows;
+}
+
+function fallbackCellStyles(rowStyles) {
+  const styles = new Map();
+  for (const row of rowStyles) {
+    if (!row) {
+      continue;
+    }
+    for (const [column, style] of row.cells) {
+      if (style && !styles.has(column)) {
+        styles.set(column, style);
+      }
+    }
+  }
+  if (!styles.has(1) && styles.has(2)) {
+    styles.set(1, styles.get(2));
+  }
+  return styles;
+}
+
+function officialWorksheetRowXml(row, rowNumber, colCount, rowStyle, fallbackStyles, prefix = "") {
+  const rowAttrs = officialRowAttributes(rowNumber, rowStyle?.attrs);
+  const cells = Array.from({ length: colCount }, (_, index) => {
+    const columnNumber = index + 1;
+    const value = row[index] ?? "";
+    const style = rowStyle?.cells.get(columnNumber) || fallbackStyles.get(columnNumber) || "";
+    return officialCellXml(value, rowNumber, columnNumber, style, prefix, rowStyle);
+  }).join("");
+  return `<${prefix}row${rowAttrs}>${cells}</${prefix}row>`;
+}
+
+function officialRowAttributes(rowNumber, attrs = {}) {
+  const keep = ["spans", "s", "customFormat", "ht", "customHeight", "hidden", "outlineLevel", "collapsed"];
+  const pairs = [`r="${rowNumber}"`];
+  for (const key of keep) {
+    if (attrs[key] !== undefined) {
+      pairs.push(`${key}="${escapeXml(attrs[key])}"`);
+    }
+  }
+  return ` ${pairs.join(" ")}`;
+}
+
+function officialCellXml(value, rowNumber, columnNumber, style, prefix = "", rowStyle = null) {
+  const ref = `${columnName(columnNumber)}${rowNumber}`;
+  const styleAttr = style ? ` s="${escapeXml(style)}"` : "";
+  if (rowNumber >= 3 && columnNumber === 2 && !normalizeText(value) && rowStyle?.cellXmls?.has(columnNumber)) {
+    return rowStyle.cellXmls.get(columnNumber);
+  }
+  if (rowNumber >= 3 && columnNumber === 2 && !normalizeText(value) && rowStyle?.cellXmls?.has(1)) {
+    return retargetCellXml(rowStyle.cellXmls.get(1), ref);
+  }
+  if (rowNumber >= 3 && columnNumber === 12) {
+    return formulaCellXml(ref, styleAttr, officialTotalScoreFormula(rowNumber), value, prefix);
+  }
+  if (rowNumber >= 3 && columnNumber === 13) {
+    return formulaCellXml(ref, styleAttr, officialTotalTimeFormula(rowNumber), value, prefix);
+  }
+  return valueCellXml(ref, styleAttr, value, prefix);
+}
+
+function formulaCellXml(ref, styleAttr, formula, cachedValue, prefix = "") {
+  const value = cachedValue === "" || cachedValue === null || cachedValue === undefined ? "" : `<${prefix}v>${Number(cachedValue)}</${prefix}v>`;
+  return `<${prefix}c r="${ref}"${styleAttr}><${prefix}f>${escapeXml(formula)}</${prefix}f>${value}</${prefix}c>`;
+}
+
+function valueCellXml(ref, styleAttr, value, prefix = "") {
+  if (value === null || value === undefined || value === "") {
+    return `<${prefix}c r="${ref}"${styleAttr}/>`;
+  }
+  const number = Number(value);
+  if (typeof value === "number" || (String(value).trim() !== "" && Number.isFinite(number) && !/^0\d+/.test(String(value)))) {
+    return `<${prefix}c r="${ref}"${styleAttr}><${prefix}v>${number}</${prefix}v></${prefix}c>`;
+  }
+  return `<${prefix}c r="${ref}"${styleAttr} t="inlineStr"><${prefix}is><${prefix}t>${escapeXml(String(value))}</${prefix}t></${prefix}is></${prefix}c>`;
+}
+
+function retargetCellXml(cellXml, ref) {
+  if (/\sr="[^"]*"/.test(cellXml)) {
+    return cellXml.replace(/\sr="[^"]*"/, ` r="${ref}"`);
+  }
+  return cellXml.replace(/<((?:[\w.-]+:)?c)\b/, `<$1 r="${ref}"`);
+}
+
+function officialTotalScoreFormula(row) {
+  return `IF(COUNTA(G${row},I${row})=0,"",G${row}+I${row})`;
+}
+
+function officialTotalTimeFormula(row) {
+  const first = `(H${row}-INT(H${row}/10000)*4000)`;
+  const second = `(J${row}-INT(J${row}/10000)*4000)`;
+  const total = `(${first}+${second})`;
+  return `IF(COUNTA(H${row},J${row})=0,"",INT(${total}/6000)*10000+MOD(${total},6000))`;
+}
+
 function summaryRow(team) {
   return [
     team.group,
     team.rank ?? "",
     team.award ?? "",
+    team.number ?? "",
+    team.city ?? "",
     team.teamName,
     team.school,
     team.studentA ?? "",
     team.studentB ?? "",
     team.coach ?? "",
+    team.coachPhone ?? "",
     completedValue(team, team.roundTotals?.[0]),
     completedValue(team, team.roundTotals?.[1]),
     completedValue(team, team.totalScore),
@@ -221,7 +416,7 @@ function completedValue(team, value) {
   return team.complete === false ? "" : value ?? "";
 }
 
-function createWorkbook(sheets) {
+async function createWorkbook(sheets) {
   const safeSheets = sheets.map((sheet, index) => ({
     ...sheet,
     name: safeSheetName(sheet.name || `Sheet${index + 1}`),
@@ -238,7 +433,7 @@ function createWorkbook(sheets) {
       data: worksheetXml(sheet.rows),
     })),
   ];
-  return createZip(files);
+  return await createZip(files);
 }
 
 function contentTypesXml(sheets) {
@@ -334,24 +529,35 @@ function xmlDocument(body) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n${body}`;
 }
 
-async function firstWorksheetMatrix(xlsxBytes) {
+async function workbookMatrices(xlsxBytes) {
   const files = await readZip(xlsxBytes);
   const workbook = parseXmlFile(files, "xl/workbook.xml");
   const rels = parseRelationships(parseXmlFile(files, "xl/_rels/workbook.xml.rels"));
   const sheets = tags(workbook, "sheet").map((tag) => parseAttributes(tag));
-  const firstSheet = sheets[0];
-  if (!firstSheet?.["r:id"]) {
+  if (!sheets.length) {
     throw new Error("工作簿没有可读取的工作表");
   }
-  const target = rels.get(firstSheet["r:id"]);
-  if (!target) {
-    throw new Error("工作表关系缺失");
-  }
-  const sheetPath = normalizeWorkbookTarget(target);
   const sharedStrings = files.has("xl/sharedStrings.xml")
     ? parseSharedStrings(parseXmlFile(files, "xl/sharedStrings.xml"))
     : [];
-  return parseWorksheet(parseXmlFile(files, sheetPath), sharedStrings);
+  const matrices = [];
+
+  sheets.forEach((sheet, index) => {
+    const target = rels.get(sheet["r:id"]);
+    if (!target) {
+      return;
+    }
+    const sheetPath = normalizeWorkbookTarget(target);
+    matrices.push({
+      name: sheet.name || `Sheet${index + 1}`,
+      matrix: parseWorksheet(parseXmlFile(files, sheetPath), sharedStrings),
+    });
+  });
+
+  if (!matrices.length) {
+    throw new Error("工作表关系缺失");
+  }
+  return matrices;
 }
 
 async function readZip(bytes) {
@@ -437,7 +643,7 @@ function parseWorksheet(xml, sharedStrings) {
       const column = attrs.r ? columnIndex(attrs.r.replace(/\d+/g, "")) : row.length;
       row[column] = cellValue(attrs, body, sharedStrings);
     }
-    rows.push(row.map((value) => value ?? ""));
+    rows.push(Array.from({ length: row.length }, (_, index) => row[index] ?? ""));
   }
   return rows;
 }
@@ -456,15 +662,68 @@ function cellValue(attrs, body, sharedStrings) {
   return decodeXml(firstTagText(body, "v"));
 }
 
-function rowsFromMatrix(matrix) {
+function rosterRowsFromSheets(sheets) {
+  const candidateSheets = selectRosterSheets(sheets);
+  return candidateSheets.flatMap((sheet) => rowsFromMatrix(sheet.matrix, sheet.name));
+}
+
+function rowsFromMatrix(matrix, sheetName = "") {
   if (!matrix.length) {
     return [];
   }
-  const headers = matrix[0].map((value) => String(value ?? "").trim());
-  return matrix
-    .slice(1)
-    .filter((row) => row.some((cell) => String(cell ?? "").trim() !== ""))
-    .map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ""])));
+  const headerIndex = findRosterHeaderRowIndex(matrix);
+  if (headerIndex < 0) {
+    return [];
+  }
+  const headers = matrix[headerIndex].map((value) => String(value ?? "").trim());
+  return matrix.slice(headerIndex + 1).flatMap((row, rowOffset) => {
+    if (!row.some((cell) => String(cell ?? "").trim() !== "")) {
+      return [];
+    }
+    const record = {};
+    headers.forEach((header, index) => {
+      if (header) {
+        record[header] = row[index] ?? "";
+      }
+    });
+    record.__sheetName = sheetName;
+    record.__rowNumber = headerIndex + rowOffset + 2;
+    return record;
+  });
+}
+
+function selectRosterSheets(sheets) {
+  const namedRosterSheets = sheets.filter((sheet) => rosterSheetPattern.test(sheet.name) && !nonRosterSheetPattern.test(sheet.name));
+  if (namedRosterSheets.length) {
+    return namedRosterSheets;
+  }
+  const plausibleSheets = sheets.filter((sheet) => !nonRosterSheetPattern.test(sheet.name));
+  return plausibleSheets.length ? plausibleSheets : sheets.slice(0, 1);
+}
+
+function findRosterHeaderRowIndex(matrix) {
+  let best = { index: -1, score: 0 };
+  for (let index = 0; index < Math.min(matrix.length, 10); index += 1) {
+    const cells = new Set(matrix[index].map((value) => String(value ?? "").trim()).filter(Boolean));
+    const hasSchool = cells.has("学校") || cells.has("学校全称") || cells.has("学校名称");
+    const hasStudents = cells.has("参赛选手") || cells.has("选手") || cells.has("参赛学生");
+    const hasTeam = cells.has("队伍名称") || cells.has("队伍名") || cells.has("队名");
+    const hasGroup = cells.has("组别");
+    const hasCoach = cells.has("指导教师") || cells.has("教练员");
+    const score = (hasSchool ? 2 : 0)
+      + (hasStudents ? 2 : 0)
+      + (hasTeam ? 2 : 0)
+      + (hasGroup ? 1 : 0)
+      + (hasCoach ? 1 : 0)
+      + (cells.has("序号") ? 1 : 0)
+      + (cells.has("教练员联系方式") ? 1 : 0);
+    if ((hasSchool && hasStudents) || (hasGroup && hasTeam)) {
+      if (score > best.score) {
+        best = { index, score };
+      }
+    }
+  }
+  return best.index;
 }
 
 function tags(xml, tagName) {
@@ -473,6 +732,10 @@ function tags(xml, tagName) {
 
 function blocks(xml, tagName) {
   return [...xml.matchAll(new RegExp(`<${qualifiedName(tagName)}\\b[^>]*>([\\s\\S]*?)<\\/${qualifiedName(tagName)}>`, "g"))].map((match) => match[1]);
+}
+
+function fullBlocks(xml, tagName) {
+  return [...xml.matchAll(new RegExp(`<${qualifiedName(tagName)}\\b[^>]*>[\\s\\S]*?<\\/${qualifiedName(tagName)}>`, "g"))].map((match) => match[0]);
 }
 
 function parseAttributes(tag) {
@@ -489,6 +752,11 @@ function firstTagText(xml, tagName) {
   return match ? decodeXml(match[1]) : "";
 }
 
+function elementPrefix(xml, tagName) {
+  const match = xml.match(new RegExp(`<((?:[\\w.-]+:)?)${tagName}\\b`));
+  return match?.[1] ?? "";
+}
+
 function qualifiedName(tagName) {
   return `(?:[\\w.-]+:)?${tagName}`;
 }
@@ -498,7 +766,16 @@ function normalizeWorkbookTarget(target) {
   return cleaned.startsWith("xl/") ? cleaned : `xl/${cleaned}`;
 }
 
-function createZip(files) {
+async function deflateCompress(bytes) {
+  try {
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  } catch {
+    return null; // Fallback: compression not available
+  }
+}
+
+async function createZip(files) {
   const chunks = [];
   const central = [];
   let offset = 0;
@@ -506,19 +783,24 @@ function createZip(files) {
 
   for (const file of files) {
     const nameBytes = textEncoder.encode(file.name);
-    const data = typeof file.data === "string" ? textEncoder.encode(file.data) : file.data;
-    const crc = crc32(data);
+    const rawData = typeof file.data === "string" ? textEncoder.encode(file.data) : file.data;
+    const crc = crc32(rawData);
+    const compressed = await deflateCompress(rawData);
+    const useCompression = compressed !== null;
+    const data = useCompression ? compressed : rawData;
+    const method = useCompression ? 8 : 0;
+
     const local = new Uint8Array(30 + nameBytes.length);
     const localView = new DataView(local.buffer);
     localView.setUint32(0, 0x04034b50, true);
     localView.setUint16(4, 20, true);
     localView.setUint16(6, 0x0800, true);
-    localView.setUint16(8, 0, true);
+    localView.setUint16(8, method, true);
     localView.setUint16(10, now.time, true);
     localView.setUint16(12, now.date, true);
     localView.setUint32(14, crc, true);
     localView.setUint32(18, data.length, true);
-    localView.setUint32(22, data.length, true);
+    localView.setUint32(22, rawData.length, true);
     localView.setUint16(26, nameBytes.length, true);
     local.set(nameBytes, 30);
     chunks.push(local, data);
@@ -529,12 +811,12 @@ function createZip(files) {
     centralView.setUint16(4, 20, true);
     centralView.setUint16(6, 20, true);
     centralView.setUint16(8, 0x0800, true);
-    centralView.setUint16(10, 0, true);
+    centralView.setUint16(10, method, true);
     centralView.setUint16(12, now.time, true);
     centralView.setUint16(14, now.date, true);
     centralView.setUint32(16, crc, true);
     centralView.setUint32(20, data.length, true);
-    centralView.setUint32(24, data.length, true);
+    centralView.setUint32(24, rawData.length, true);
     centralView.setUint16(28, nameBytes.length, true);
     centralView.setUint32(42, offset, true);
     centralHeader.set(nameBytes, 46);

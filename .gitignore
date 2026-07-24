@@ -1,6 +1,8 @@
 node_modules/
 outputs/
+output/
 tmp/
 .codex-spreadsheet-inspect/
 .worktrees/
 *.log
+dist/

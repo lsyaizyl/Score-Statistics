@@ -1,6 +1,30 @@
 export const GROUPS = ["小学组", "初中组", "高中组"];
 
 export const REQUIRED_ROSTER_COLUMNS = ["组别", "队伍名称", "学校", "选手A", "选手B", "指导教师"];
+export const ROSTER_TEMPLATE_COLUMNS = ["组别", "序号", "地市", "学校全称", "参赛选手", "教练员", "教练员联系方式", "抽签号", "队伍名称", "备注"];
+export const OFFICIAL_SCORE_OUTPUT_FILENAME = "26届省赛道路工程_成绩表.xlsx";
+export const OFFICIAL_SCORE_SHEET_NAMES = {
+  小学组: "小学组成绩表",
+  初中组: "初中组成绩表",
+  高中组: "高中组成绩表",
+};
+export const OFFICIAL_SCORE_HEADERS = [
+  "出场\n序号",
+  "系统编号",
+  "地市",
+  "学校名称",
+  "参赛选手",
+  "教练员",
+  "第一轮\n分数",
+  "第一轮\n完成时间",
+  "第二轮\n分数",
+  "第二轮\n完成时间",
+  "重量",
+  "总成绩",
+  "总用时",
+  "名次",
+  "等次",
+];
 
 export const AWARDS = {
   first: "一等奖",
@@ -84,54 +108,191 @@ export function toNumber(value, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+const ROSTER_COLUMN_ALIASES = {
+  group: ["组别"],
+  teamName: ["队伍名称", "队伍名", "队名", "团队名称"],
+  school: ["学校", "学校全称", "学校名称"],
+  students: ["参赛选手", "选手", "参赛学生", "学生"],
+  studentA: ["选手A", "选手 A", "学生A", "学生 A"],
+  studentB: ["选手B", "选手 B", "学生B", "学生 B"],
+  coach: ["指导教师", "教练员", "教练", "指导老师"],
+  coachPhone: ["教练员联系方式", "联系方式", "联系电话", "手机号码", "手机号"],
+  serial: ["序号", "出场序号"],
+  systemId: ["系统编号"],
+  number: ["编号", "队伍编号"],
+  drawNumber: ["抽签号"],
+  city: ["地市", "城市", "地区"],
+  note: ["备注"],
+};
+
+const COMPETITION_ROSTER_REQUIRED_FIELDS = [
+  ["序号", ROSTER_COLUMN_ALIASES.serial],
+  ["地市", ROSTER_COLUMN_ALIASES.city],
+  ["学校全称", ROSTER_COLUMN_ALIASES.school],
+  ["参赛选手", ROSTER_COLUMN_ALIASES.students],
+  ["教练员", ROSTER_COLUMN_ALIASES.coach],
+  ["教练员联系方式", ROSTER_COLUMN_ALIASES.coachPhone],
+];
+
 export function validateRosterRows(rows) {
   const presentColumns = new Set(rows.flatMap((row) => Object.keys(row ?? {})));
-  const missingColumns = REQUIRED_ROSTER_COLUMNS.filter((column) => !presentColumns.has(column));
+  const missingColumns = detectMissingRosterColumns(presentColumns);
   const issues = [];
   const seen = new Set();
   const validRows = [];
 
   rows.forEach((row, index) => {
-    const rowNumber = index + 2;
-    const group = normalizeText(row?.组别);
-    const teamName = normalizeText(row?.队伍名称);
-    const school = normalizeText(row?.学校);
-    const studentA = normalizeText(row?.选手A);
-    const studentB = normalizeText(row?.选手B);
-    const coach = normalizeText(row?.指导教师);
+    const normalized = normalizeRosterRow(row, index);
     const rowIssues = [];
 
-    if (!teamName) {
-      rowIssues.push({ type: "empty-team", rowNumber, message: "队伍名称为空" });
+    if (!normalized.school && usesCompetitionRosterColumns(presentColumns)) {
+      rowIssues.push({ type: "empty-school", rowNumber: normalized.rowNumber, message: "学校全称为空" });
     }
-    if (group && !GROUPS.includes(group)) {
-      rowIssues.push({ type: "unknown-group", rowNumber, message: `未知组别：${group}` });
+    if (!normalized.rawStudents && usesCompetitionRosterColumns(presentColumns)) {
+      rowIssues.push({ type: "empty-students", rowNumber: normalized.rowNumber, message: "参赛选手为空" });
     }
-    if (teamName) {
-      const duplicateKey = `${group}|${teamName}`;
+    if (!normalized.teamName) {
+      rowIssues.push({ type: "empty-team", rowNumber: normalized.rowNumber, message: "队伍名称为空" });
+    }
+    if (!GROUPS.includes(normalized.group)) {
+      rowIssues.push({ type: "unknown-group", rowNumber: normalized.rowNumber, message: `未知组别：${normalized.group || "未填写"}` });
+    }
+    if (normalized.teamName) {
+      const duplicateKey = rosterDuplicateKey(normalized);
       if (seen.has(duplicateKey)) {
-        rowIssues.push({ type: "duplicate-team", rowNumber, message: `重复队伍：${teamName}` });
+        rowIssues.push({ type: "duplicate-team", rowNumber: normalized.rowNumber, message: `重复队伍：${normalized.teamName}` });
       }
       seen.add(duplicateKey);
     }
 
     issues.push(...rowIssues);
-    if (!missingColumns.length && !rowIssues.length && group && teamName) {
+    if (!missingColumns.length && !rowIssues.length && normalized.group && normalized.teamName) {
       validRows.push({
-        id: createTeamId(group, teamName, validRows.length),
-        group,
-        teamName,
-        school,
-        studentA,
-        studentB,
-        coach,
-        number: normalizeText(row?.编号),
-        note: normalizeText(row?.备注),
+        id: createTeamId(normalized.group, normalized.systemId || normalized.teamName, validRows.length),
+        group: normalized.group,
+        teamName: normalized.teamName,
+        school: normalized.school,
+        studentA: normalized.studentA,
+        studentB: normalized.studentB,
+        coach: normalized.coach,
+        number: normalized.number,
+        note: normalized.note,
+        city: normalized.city,
+        coachPhone: normalized.coachPhone,
+        serial: normalized.serial,
+        systemId: normalized.systemId,
+        rawStudents: normalized.rawStudents,
+        sourceSheet: normalized.sourceSheet,
       });
     }
   });
 
   return { missingColumns, issues, validRows };
+}
+
+function normalizeRosterRow(row, index) {
+  const rowColumns = new Set(Object.keys(row ?? {}));
+  const isCompetitionRoster = usesCompetitionRosterColumns(rowColumns);
+  const sourceSheet = normalizeText(row?.__sheetName);
+  const rowNumber = Number(row?.__rowNumber) || index + 2;
+  const rawStudents = firstValue(row, ROSTER_COLUMN_ALIASES.students);
+  const splitStudents = splitRosterNames(rawStudents);
+  const studentA = firstValue(row, ROSTER_COLUMN_ALIASES.studentA) || splitStudents[0] || "";
+  const studentB = firstValue(row, ROSTER_COLUMN_ALIASES.studentB) || splitStudents.slice(1).join("、");
+  const school = firstValue(row, ROSTER_COLUMN_ALIASES.school);
+  const serial = firstValue(row, ROSTER_COLUMN_ALIASES.serial);
+  const number = isCompetitionRoster
+    ? firstValue(row, ROSTER_COLUMN_ALIASES.drawNumber)
+    : firstValue(row, ROSTER_COLUMN_ALIASES.number) || firstValue(row, ROSTER_COLUMN_ALIASES.drawNumber);
+  const systemId = isCompetitionRoster ? number : firstValue(row, ROSTER_COLUMN_ALIASES.systemId);
+  const group = normalizeGroup(firstValue(row, ROSTER_COLUMN_ALIASES.group) || sourceSheet);
+  const explicitTeamName = firstValue(row, ROSTER_COLUMN_ALIASES.teamName);
+  const teamName = explicitTeamName || (isCompetitionRoster
+    ? composeTeamName(school, [studentA, studentB].filter(Boolean).join("、"), number)
+    : "");
+
+  return {
+    rowNumber,
+    sourceSheet,
+    group,
+    teamName,
+    school,
+    studentA,
+    studentB,
+    coach: firstValue(row, ROSTER_COLUMN_ALIASES.coach),
+    number,
+    note: firstValue(row, ROSTER_COLUMN_ALIASES.note),
+    city: firstValue(row, ROSTER_COLUMN_ALIASES.city),
+    coachPhone: firstValue(row, ROSTER_COLUMN_ALIASES.coachPhone),
+    serial,
+    systemId,
+    rawStudents,
+  };
+}
+
+export function splitRosterNames(value) {
+  return normalizeText(value)
+    .split(/[、,，;；/\\\n\r]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function firstValue(row, aliases) {
+  for (const alias of aliases) {
+    const value = normalizeText(row?.[alias]);
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function composeTeamName(school, students, fallback) {
+  const normalizedSchool = normalizeText(school);
+  const normalizedStudents = normalizeText(students);
+  if (normalizedSchool && normalizedStudents) {
+    return `${normalizedSchool}（${normalizedStudents}）`;
+  }
+  return normalizedSchool || normalizedStudents || normalizeText(fallback);
+}
+
+function normalizeGroup(value) {
+  const text = normalizeText(value);
+  if (GROUPS.includes(text)) {
+    return text;
+  }
+  if (text.includes("小学")) {
+    return "小学组";
+  }
+  if (text.includes("初中")) {
+    return "初中组";
+  }
+  if (text.includes("高中")) {
+    return "高中组";
+  }
+  return text;
+}
+
+function detectMissingRosterColumns(presentColumns) {
+  if (usesCompetitionRosterColumns(presentColumns)) {
+    return COMPETITION_ROSTER_REQUIRED_FIELDS
+      .filter(([, aliases]) => !aliases.some((alias) => presentColumns.has(alias)))
+      .map(([label]) => label);
+  }
+  return REQUIRED_ROSTER_COLUMNS.filter((column) => !presentColumns.has(column));
+}
+
+function usesCompetitionRosterColumns(presentColumns) {
+  return [
+    ...ROSTER_COLUMN_ALIASES.students,
+    ...ROSTER_COLUMN_ALIASES.coachPhone,
+    ...ROSTER_COLUMN_ALIASES.city,
+    ...ROSTER_COLUMN_ALIASES.serial,
+  ].some((column) => presentColumns.has(column));
+}
+
+function rosterDuplicateKey(row) {
+  return `${row.group}|${row.systemId || row.teamName}`;
 }
 
 export function createTeamId(group, teamName, index = 0) {
@@ -159,6 +320,7 @@ export function createEntryFromRoster(row) {
 export function validateManualTeam(fields, existingEntries = []) {
   const group = normalizeText(fields?.group);
   const teamName = normalizeText(fields?.teamName);
+  const number = normalizeText(fields?.number);
   const issues = [];
 
   if (!teamName) {
@@ -171,6 +333,11 @@ export function validateManualTeam(fields, existingEntries = []) {
     normalizeText(entry.group) === group && normalizeText(entry.teamName) === teamName
   ))) {
     issues.push({ type: "duplicate-team", field: "teamName", message: `本组已存在队伍：${teamName}` });
+  }
+  if (number && existingEntries.some((entry) => (
+    normalizeText(entry.group) === group && normalizeText(entry.number) === number
+  ))) {
+    issues.push({ type: "duplicate-number", field: "number", message: `本组已存在编号：${number}` });
   }
 
   return issues;
@@ -188,6 +355,10 @@ export function createManualEntry(fields, index = 0) {
     studentB: normalizeText(fields?.studentB),
     coach: normalizeText(fields?.coach),
     number: normalizeText(fields?.number),
+    city: normalizeText(fields?.city),
+    coachPhone: normalizeText(fields?.coachPhone),
+    serial: normalizeText(fields?.serial),
+    systemId: normalizeText(fields?.systemId) || normalizeText(fields?.number),
     note: normalizeText(fields?.note),
     source: "manual",
   });
@@ -196,7 +367,7 @@ export function createManualEntry(fields, index = 0) {
 export function mergeRosterEntries(existingEntries = [], importedEntries = []) {
   const entries = existingEntries.map((entry) => ({ ...entry }));
   const byTeam = new Map(entries.map((entry) => [teamKey(entry), entry]));
-  const profileFields = ["school", "studentA", "studentB", "coach", "number", "note"];
+  const profileFields = ["school", "studentA", "studentB", "coach", "number", "city", "coachPhone", "serial", "systemId", "rawStudents", "sourceSheet", "note"];
   let duplicates = 0;
 
   for (const imported of importedEntries) {
@@ -220,7 +391,7 @@ export function mergeRosterEntries(existingEntries = [], importedEntries = []) {
 }
 
 function teamKey(entry) {
-  return `${normalizeText(entry?.group)}|${normalizeText(entry?.teamName)}`;
+  return `${normalizeText(entry?.group)}|${normalizeText(entry?.systemId) || normalizeText(entry?.teamName)}`;
 }
 
 export function calculateTeam(entry) {
@@ -423,11 +594,14 @@ export function clampAwardCounts(counts, activeCount) {
 
 export function assignAwards(rankedTeams, countsByGroupOrCounts) {
   const teamsByGroup = groupBy(rankedTeams, (team) => team.group);
+  const activeTeamsByGroup = new Map();
+  for (const [group, groupTeams] of teamsByGroup) {
+    activeTeamsByGroup.set(group, groupTeams.filter((candidate) => candidate.complete !== false && !candidate.eliminated));
+  }
   const output = [];
 
   for (const team of rankedTeams) {
-    const groupTeams = teamsByGroup.get(team.group) ?? [];
-    const activeGroupTeams = groupTeams.filter((candidate) => candidate.complete !== false && !candidate.eliminated);
+    const activeGroupTeams = activeTeamsByGroup.get(team.group) ?? [];
     const counts = isSingleAwardCount(countsByGroupOrCounts)
       ? clampAwardCounts(countsByGroupOrCounts, activeGroupTeams.length)
       : clampAwardCounts(countsByGroupOrCounts?.[team.group] ?? suggestAwardCounts(activeGroupTeams.length), activeGroupTeams.length);
@@ -468,8 +642,222 @@ export function buildGroupResults(entries, awardCountsByGroup = {}) {
   return groups;
 }
 
+export function buildOfficialScoreSheets(entries, awardCountsByGroup = {}, existingSheets = {}) {
+  const groups = buildGroupResults(entries, awardCountsByGroup);
+  return GROUPS.map((group) => {
+    const name = OFFICIAL_SCORE_SHEET_NAMES[group];
+    return {
+      group,
+      name,
+      rows: buildOfficialScoreRows(group, groups[group], existingScoreRows(existingSheets, name)),
+    };
+  });
+}
+
+export function buildOfficialScoreRows(group, result, existingRows = []) {
+  const existingDataRows = existingRows
+    .slice(2)
+    .map(normalizeOfficialExistingRow)
+    .filter((row) => Array.isArray(row) && row.some((cell) => normalizeText(cell)));
+  const teamRecords = (result?.teams ?? []).map((team, index) => ({
+    team,
+    token: officialTeamToken(team, index),
+  }));
+  const lookup = buildOfficialTeamLookup(teamRecords);
+  const used = new Set();
+  const rows = [
+    [officialScoreTitle(group), ...Array.from({ length: OFFICIAL_SCORE_HEADERS.length - 1 }, () => "")],
+    OFFICIAL_SCORE_HEADERS,
+  ];
+
+  existingDataRows.forEach((existingRow, index) => {
+    const record = matchOfficialTeam(existingRow, index, lookup, used);
+    if (record) {
+      used.add(record.token);
+    }
+    rows.push(officialScoreDataRow(record?.team ?? null, existingRow));
+  });
+
+  for (const record of teamRecords) {
+    if (!used.has(record.token)) {
+      used.add(record.token);
+      rows.push(officialScoreDataRow(record.team, []));
+    }
+  }
+
+  return rows;
+}
+
+export function secondsToOfficialTime(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "";
+  }
+  const centiseconds = Math.round(seconds * 100);
+  const minutes = Math.floor(centiseconds / 6000);
+  const remainder = centiseconds % 6000;
+  const secondPart = Math.floor(remainder / 100);
+  const hundredths = remainder % 100;
+  return minutes * 10000 + secondPart * 100 + hundredths;
+}
+
+export function officialScoreTitle(group) {
+  return `第二十六届广东省青少年机器人竞赛-道路工程比赛成绩表（${group}）`;
+}
+
 function isSingleAwardCount(value) {
   return value && ["first", "second", "third"].some((key) => Object.hasOwn(value, key));
+}
+
+function existingScoreRows(existingSheets, sheetName) {
+  if (existingSheets instanceof Map) {
+    return existingSheets.get(sheetName) ?? [];
+  }
+  return existingSheets?.[sheetName] ?? [];
+}
+
+function buildOfficialTeamLookup(teamRecords) {
+  const bySerial = new Map();
+  const byNumber = new Map();
+  const bySystemId = new Map();
+  const byProfile = new Map();
+
+  for (const record of teamRecords) {
+    addLookupRecord(bySerial, record.team.serial, record);
+    addLookupRecord(byNumber, record.team.number, record);
+    addLookupRecord(bySystemId, record.team.systemId, record);
+    for (const key of officialProfileKeysForTeam(record.team)) {
+      addLookupRecord(byProfile, key, record, false);
+    }
+  }
+
+  return { bySerial, byNumber, bySystemId, byProfile };
+}
+
+function addLookupRecord(map, value, record, shouldNormalize = true) {
+  const key = shouldNormalize ? officialKeyText(value) : value;
+  if (!key) {
+    return;
+  }
+  if (!map.has(key)) {
+    map.set(key, []);
+  }
+  map.get(key).push(record);
+}
+
+function matchOfficialTeam(existingRow, index, lookup, used) {
+  const candidates = [
+    lookup.bySerial.get(officialKeyText(index + 1)),
+    lookup.byNumber.get(officialKeyText(existingRow[0])),
+    lookup.bySystemId.get(officialKeyText(existingRow[1])),
+    ...officialProfileKeysForExistingRow(existingRow).map((key) => lookup.byProfile.get(key)),
+  ];
+
+  for (const records of candidates) {
+    const record = firstUnusedOfficialRecord(records, used);
+    if (record) {
+      return record;
+    }
+  }
+  return null;
+}
+
+function firstUnusedOfficialRecord(records, used) {
+  return records?.find((record) => !used.has(record.token)) ?? null;
+}
+
+function officialScoreDataRow(team, existingRow = []) {
+  const complete = team && team.complete !== false;
+  const students = teamStudentsText(team);
+  const firstRoundTime = complete ? secondsToOfficialTime(team.rounds?.[0]?.seconds) : "";
+  const secondRoundTime = complete ? secondsToOfficialTime(team.rounds?.[1]?.seconds) : "";
+  const totalTime = complete ? secondsToOfficialTime(team.totalSeconds) : "";
+
+  return [
+    team ? normalizeText(team.number) : normalizeText(existingRow[0]),
+    officialSystemId(team, existingRow[1]),
+    officialProfileValue(team, existingRow[2], team?.city),
+    officialProfileValue(team, existingRow[3], team?.school),
+    officialProfileValue(team, existingRow[4], students),
+    officialProfileValue(team, existingRow[5], team?.coach),
+    complete ? team.roundTotals?.[0] ?? "" : "",
+    firstRoundTime,
+    complete ? team.roundTotals?.[1] ?? "" : "",
+    secondRoundTime,
+    team ? team.robotWeight ?? "" : "",
+    complete ? team.totalScore ?? "" : "",
+    totalTime,
+    complete ? team.rank ?? "" : "",
+    complete ? team.award ?? "" : "",
+  ];
+}
+
+function normalizeOfficialExistingRow(row) {
+  if (!Array.isArray(row)) {
+    return [];
+  }
+  const first = normalizeText(row[0]);
+  const second = normalizeText(row[1]);
+  if (first && !second && normalizeText(row[2])) {
+    return ["", "", ...row.slice(2)].slice(0, OFFICIAL_SCORE_HEADERS.length);
+  }
+  if (/^D\d{4,}$/i.test(first) && second && !/^D\d{4,}$/i.test(second)) {
+    return ["", ...row].slice(0, OFFICIAL_SCORE_HEADERS.length);
+  }
+  return row;
+}
+
+function officialSystemId(team, existingValue) {
+  const existing = normalizeText(existingValue);
+  if (existing) {
+    return existing;
+  }
+  const systemId = normalizeText(team?.systemId);
+  return systemId && systemId !== normalizeText(team?.number) ? systemId : "";
+}
+
+function officialProfileValue(team, existingValue, fallback) {
+  return normalizeText(existingValue) || normalizeText(fallback) || (team ? "" : normalizeText(existingValue));
+}
+
+function officialProfileKeysForTeam(team) {
+  const city = officialKeyText(team?.city);
+  const school = officialKeyText(team?.school);
+  const students = officialKeyText(teamStudentsText(team));
+  const teamName = officialKeyText(team?.teamName);
+  return [
+    [city, school, students].filter(Boolean).join("|"),
+    [school, students].filter(Boolean).join("|"),
+    teamName,
+  ].filter(Boolean);
+}
+
+function officialProfileKeysForExistingRow(row) {
+  const city = officialKeyText(row[2]);
+  const school = officialKeyText(row[3]);
+  const students = officialKeyText(row[4]);
+  const teamName = officialKeyText(composeTeamName(row[3], row[4], ""));
+  return [
+    [city, school, students].filter(Boolean).join("|"),
+    [school, students].filter(Boolean).join("|"),
+    teamName,
+  ].filter(Boolean);
+}
+
+function teamStudentsText(team) {
+  if (!team) {
+    return "";
+  }
+  return normalizeText(team.rawStudents) || [team.studentA, team.studentB].map(normalizeText).filter(Boolean).join("、");
+}
+
+function officialTeamToken(team, index) {
+  return normalizeText(team?.id)
+    || `${normalizeText(team?.group)}|${normalizeText(team?.systemId)}|${normalizeText(team?.teamName)}|${index}`;
+}
+
+function officialKeyText(value) {
+  return normalizeText(value).replace(/\s+/g, "").toLocaleLowerCase();
 }
 
 function groupBy(items, getKey) {

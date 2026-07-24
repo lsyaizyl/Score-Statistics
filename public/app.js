@@ -19,7 +19,11 @@ const app = document.querySelector("#app");
 const state = hydrateState(loadState());
 state.awardCountsByGroup = reconcileAwardCounts(state.entries, state.awardCountsByGroup, state.awardManualGroups);
 let teamDialogContext = { mode: "create", entryId: null };
-let scoreRenderTimer = null;
+function debounce(fn, ms) {
+  let timer;
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+}
+const debouncedSaveAndRender = debounce((options) => saveAndRender(options), 200);
 
 render();
 
@@ -41,20 +45,22 @@ function render(options = {}) {
     </div>
   `;
   bindEvents();
-  restoreFocus(options);
+  restoreViewport(options);
 }
 
 function buildViewModel() {
   const statuses = new Map(state.entries.map((entry) => [entry.id, getEntryWorkflowStatus(entry)]));
   const calculated = state.entries.map(calculateTeam);
+  const calculatedById = new Map(calculated.map((c) => [c.id, c]));
   const groups = buildGroupResults(state.entries, state.awardCountsByGroup);
   const reviewedCount = state.entries.filter((entry) => statuses.get(entry.id)?.key === "reviewed").length;
-  const paperCompleteCount = state.entries.filter((entry) => calculateTeam(entry).complete).length;
+  const paperCompleteCount = calculated.filter((c) => c.complete).length;
   const unresolvedEntries = state.entries.filter((entry) => !["ready", "reviewed"].includes(statuses.get(entry.id)?.key));
 
   return {
     statuses,
     calculated,
+    calculatedById,
     groups,
     reviewedCount,
     paperCompleteCount,
@@ -98,17 +104,17 @@ function progressStrip(model) {
   const pending = Math.max(0, state.entries.length - model.reviewedCount);
   return `
     <section class="progress-strip" aria-label="录入进度">
-      ${compactMetric("队伍", state.entries.length)}
-      ${compactMetric("纸单完整", model.paperCompleteCount)}
-      ${compactMetric("已复核", model.reviewedCount)}
-      ${compactMetric("待处理", pending, pending ? "warn" : "ok")}
+      ${compactMetric("队伍", state.entries.length, "", "teams")}
+      ${compactMetric("纸单完整", model.paperCompleteCount, "", "complete")}
+      ${compactMetric("已复核", model.reviewedCount, "", "reviewed")}
+      ${compactMetric("待处理", pending, pending ? "warn" : "ok", "pending")}
       <span class="save-state">本机自动保存</span>
     </section>
   `;
 }
 
-function compactMetric(label, value, tone = "") {
-  return `<div class="compact-metric ${tone}"><span>${label}</span><strong>${value}</strong></div>`;
+function compactMetric(label, value, tone = "", key = "") {
+  return `<div class="compact-metric ${tone}" ${key ? `data-metric="${escapeAttr(key)}"` : ""}><span>${label}</span><strong>${value}</strong></div>`;
 }
 
 function paperEntryView(model) {
@@ -141,7 +147,7 @@ function paperEntryView(model) {
 function entryQueue(model) {
   const filtered = state.entries.filter((entry) => {
     const status = model.statuses.get(entry.id);
-    const haystack = `${entry.number ?? ""}${entry.teamName}${entry.school ?? ""}${entry.studentA ?? ""}${entry.studentB ?? ""}`;
+    const haystack = `${entry.number ?? ""}${entry.systemId ?? ""}${entry.serial ?? ""}${entry.city ?? ""}${entry.teamName}${entry.school ?? ""}${entry.studentA ?? ""}${entry.studentB ?? ""}${entry.coach ?? ""}${entry.coachPhone ?? ""}`;
     return (state.queueGroup === "全部" || entry.group === state.queueGroup)
       && (state.queueStatus === "全部" || status?.key === state.queueStatus)
       && haystack.toLocaleLowerCase().includes(state.query.toLocaleLowerCase());
@@ -154,10 +160,13 @@ function entryQueue(model) {
           <h2>纸单队列</h2>
           <span>${filtered.length} / ${state.entries.length}</span>
         </div>
-        <button class="icon-button" data-action="open-create" type="button" title="手工建队" aria-label="手工建队">+</button>
+        <div class="queue-header-actions">
+          <button class="button button-danger-quiet button-small" data-action="clear-all" type="button">删除全部队伍</button>
+          <button class="icon-button" data-action="open-create" type="button" title="手工建队" aria-label="手工建队">+</button>
+        </div>
       </div>
       <div class="queue-filters">
-        <input id="queueSearch" class="text-input" value="${escapeAttr(state.query)}" placeholder="队伍 / 编号 / 学校">
+        <input id="queueSearch" class="text-input" value="${escapeAttr(state.query)}" placeholder="队伍 / 抽签号 / 学校 / 地市">
         <div class="filter-row">
           <select id="queueGroup" class="select-input" aria-label="筛选组别">
             ${["全部", ...GROUPS].map((group) => `<option value="${group}" ${state.queueGroup === group ? "selected" : ""}>${group}</option>`).join("")}
@@ -189,13 +198,13 @@ function statusFilterOptions() {
 
 function queueItem(entry, model) {
   const status = model.statuses.get(entry.id);
-  const calculated = calculateTeam(entry);
+  const calculated = model.calculatedById.get(entry.id) ?? calculateTeam(entry);
   return `
     <button class="queue-item ${entry.id === state.activeEntryId ? "active" : ""}" data-entry-id="${escapeAttr(entry.id)}" type="button">
       <span class="queue-item-main">
         <span class="queue-number">${escapeHtml(entry.number || entry.group)}</span>
         <strong>${escapeHtml(entry.teamName)}</strong>
-        <small>${escapeHtml(entry.school || "资料待补")}</small>
+        <small>${escapeHtml(profileLine(entry) || "资料待补")}</small>
       </span>
       <span class="queue-item-side">
         ${statusBadge(status)}
@@ -205,12 +214,18 @@ function queueItem(entry, model) {
   `;
 }
 
+function profileLine(entry) {
+  return [entry.city, entry.school, entry.coachPhone ? `教练 ${entry.coachPhone}` : ""]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function paperEditor(entry, model) {
   if (!entry) {
     return `<section class="paper-stage"><div class="queue-empty">请选择队伍</div></section>`;
   }
   const status = model.statuses.get(entry.id);
-  const calculated = calculateTeam(entry);
+  const calculated = model.calculatedById.get(entry.id) ?? calculateTeam(entry);
   const index = state.entries.findIndex((candidate) => candidate.id === entry.id);
   const isFirst = index <= 0;
   const isLast = index >= state.entries.length - 1;
@@ -232,7 +247,7 @@ function paperEditor(entry, model) {
           <div>
             <p>道路工程记分表</p>
             <h1>${escapeHtml(entry.teamName)}</h1>
-            <span>${escapeHtml([entry.group, entry.number, entry.school].filter(Boolean).join(" · "))}</span>
+            <span>${escapeHtml([entry.group, entry.number, entry.city, entry.school].filter(Boolean).join(" · "))}</span>
           </div>
           ${statusBadge(status, true)}
         </header>
@@ -253,10 +268,10 @@ function paperEditor(entry, model) {
           </table>
         </div>
         <section class="score-summary">
-          ${summaryValue("第一轮", calculated.complete || status.filled ? calculated.roundTotals[0] : "--", "分")}
-          ${summaryValue("第二轮", calculated.complete || status.filled ? calculated.roundTotals[1] : "--", "分")}
-          ${summaryValue("总成绩", calculated.complete ? calculated.totalScore : "--", "分", "strong")}
-          ${summaryValue("总用时", calculated.complete ? calculated.totalSeconds : "--", "秒")}
+          ${summaryValue("第一轮", calculated.complete || status.filled ? calculated.roundTotals[0] : "--", "分", "", "round-0")}
+          ${summaryValue("第二轮", calculated.complete || status.filled ? calculated.roundTotals[1] : "--", "分", "", "round-1")}
+          ${summaryValue("总成绩", calculated.complete ? calculated.totalScore : "--", "分", "strong", "total-score")}
+          ${summaryValue("总用时", calculated.complete ? calculated.totalSeconds : "--", "秒", "", "total-seconds")}
           <label class="weight-field">
             <span>机器人重量</span>
             <span><input id="robotWeight" data-score-field data-field="robotWeight" type="number" min="0.01" step="0.01" value="${escapeAttr(entry.robotWeight)}"> kg</span>
@@ -330,8 +345,8 @@ function timeRow(entry) {
   `;
 }
 
-function summaryValue(label, value, unit, className = "") {
-  return `<div class="summary-value ${className}"><span>${label}</span><strong>${value}</strong><small>${unit}</small></div>`;
+function summaryValue(label, value, unit, className = "", key = "") {
+  return `<div class="summary-value ${className}" ${key ? `data-summary="${escapeAttr(key)}"` : ""}><span>${label}</span><strong>${value}</strong><small>${unit}</small></div>`;
 }
 
 function paperCheckMessage(status) {
@@ -355,7 +370,7 @@ function paperCheckMessage(status) {
 function overviewView(model) {
   const rows = GROUPS.flatMap((group) => model.groups[group].teams.map((team) => ({ ...team, group })))
     .filter((team) => state.overviewGroup === "全部" || team.group === state.overviewGroup)
-    .filter((team) => `${team.number ?? ""}${team.teamName}${team.school ?? ""}`.toLocaleLowerCase().includes(state.overviewQuery.toLocaleLowerCase()));
+    .filter((team) => `${team.number ?? ""}${team.systemId ?? ""}${team.city ?? ""}${team.teamName}${team.school ?? ""}${team.studentA ?? ""}${team.studentB ?? ""}${team.coachPhone ?? ""}`.toLocaleLowerCase().includes(state.overviewQuery.toLocaleLowerCase()));
 
   return `
     <section class="page-section">
@@ -368,18 +383,18 @@ function overviewView(model) {
           <div class="segmented-control">
             ${["全部", ...GROUPS].map((group) => `<button class="${state.overviewGroup === group ? "active" : ""}" data-overview-group="${group}" type="button">${group}</button>`).join("")}
           </div>
-          <input id="overviewSearch" class="text-input overview-search" value="${escapeAttr(state.overviewQuery)}" placeholder="搜索队伍 / 学校">
+          <input id="overviewSearch" class="text-input overview-search" value="${escapeAttr(state.overviewQuery)}" placeholder="搜索队伍 / 抽签号 / 学校 / 地市">
         </div>
       </header>
       <div class="data-table-wrap">
         <table class="data-table">
           <thead>
             <tr>
-              <th>组别</th><th>编号</th><th>队伍</th><th>录入状态</th><th>第一轮</th><th>第二轮</th><th>总成绩</th><th>总用时</th><th>重量</th><th>排名</th><th>奖项</th>
+              <th>组别</th><th>抽签号</th><th>地市</th><th>队伍</th><th>录入状态</th><th>第一轮</th><th>第二轮</th><th>总成绩</th><th>总用时</th><th>重量</th><th>排名</th><th>奖项</th>
             </tr>
           </thead>
           <tbody>
-            ${rows.length ? rows.map((team) => overviewRow(team, model)).join("") : `<tr><td colspan="11" class="table-empty">暂无数据</td></tr>`}
+            ${rows.length ? rows.map((team) => overviewRow(team, model)).join("") : `<tr><td colspan="12" class="table-empty">暂无数据</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -393,6 +408,7 @@ function overviewRow(team, model) {
     <tr class="clickable-row" data-open-entry="${escapeAttr(team.id)}">
       <td>${escapeHtml(team.group)}</td>
       <td>${escapeHtml(team.number || "--")}</td>
+      <td>${escapeHtml(team.city || "--")}</td>
       <td><strong>${escapeHtml(team.teamName)}</strong><span>${escapeHtml(team.school || "")}</span></td>
       <td>${statusBadge(status)}</td>
       <td>${team.complete ? team.roundTotals[0] : "--"}</td>
@@ -422,7 +438,7 @@ function awardsView(model) {
         </div>
         <div class="section-tools">
           <button class="button button-secondary" data-action="reset-awards" type="button">重算名额</button>
-          <button class="button button-primary" data-action="export" type="button" ${state.entries.length && !state.busy ? "" : "disabled"}>${state.busy ? "正在生成..." : "导出成绩包"}</button>
+          <button class="button button-primary" data-action="export" type="button" ${state.entries.length && !state.busy ? "" : "disabled"}>${state.busy ? "正在生成..." : "导出成绩表"}</button>
         </div>
       </header>
       <div class="awards-layout">
@@ -439,6 +455,11 @@ function awardsView(model) {
           <div class="subsection-heading">
             <h2>导出前检查</h2>
             <span>${workflowIssues.length + state.issues.length} 项待处理</span>
+          </div>
+          <div class="export-source-note">
+            ${state.sourceWorkbook?.filename
+              ? `将回填：${escapeHtml(state.sourceWorkbook.filename)}`
+              : "未导入原成绩表时，将生成同列结构的新成绩表。"}
           </div>
           ${workflowIssueList(workflowIssues, state.issues)}
         </section>
@@ -466,7 +487,7 @@ function awardsView(model) {
       </section>
       <footer class="danger-zone">
         <span>本机数据</span>
-        <button class="button button-danger-quiet button-small" data-action="clear-all" type="button">清空全部</button>
+        <button class="button button-danger-quiet button-small" data-action="clear-all" type="button">删除全部队伍</button>
       </footer>
     </section>
   `;
@@ -515,12 +536,15 @@ function teamDialog() {
         </header>
         <div class="team-form-grid">
           <label><span>组别 *</span><select name="group" required>${GROUPS.map((group) => `<option value="${group}">${group}</option>`).join("")}</select></label>
-          <label><span>队伍编号</span><input name="number" autocomplete="off"></label>
-          <label class="wide"><span>队伍名称 *</span><input name="teamName" required autocomplete="off"></label>
-          <label class="wide"><span>学校</span><input name="school" autocomplete="off"></label>
-          <label><span>选手 A</span><input name="studentA" autocomplete="off"></label>
-          <label><span>选手 B</span><input name="studentB" autocomplete="off"></label>
-          <label class="wide"><span>指导教师</span><input name="coach" autocomplete="off"></label>
+          <label><span>序号</span><input name="serial" autocomplete="off"></label>
+          <label><span>抽签号</span><input name="number" autocomplete="off"></label>
+          <label><span>地市</span><input name="city" autocomplete="off"></label>
+          <label class="wide"><span>队伍名称</span><input name="teamName" autocomplete="off"></label>
+          <label class="wide"><span>学校全称</span><input name="school" autocomplete="off"></label>
+          <label><span>参赛选手 A</span><input name="studentA" autocomplete="off"></label>
+          <label><span>参赛选手 B</span><input name="studentB" autocomplete="off"></label>
+          <label><span>教练员</span><input name="coach" autocomplete="off"></label>
+          <label><span>教练员联系方式</span><input name="coachPhone" autocomplete="off" inputmode="tel"></label>
           <label class="wide"><span>备注</span><input name="note" autocomplete="off"></label>
         </div>
         <div id="teamFormError" class="form-error" role="alert"></div>
@@ -534,15 +558,56 @@ function teamDialog() {
 }
 
 function bindEvents() {
-  document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => {
-    state.view = button.dataset.view;
-    saveAndRender();
-  }));
-  document.querySelectorAll("[data-action='open-create']").forEach((button) => button.addEventListener("click", () => openTeamDialog("create")));
-  document.querySelector("[data-action='open-edit']")?.addEventListener("click", () => openTeamDialog("edit", state.activeEntryId));
-  document.querySelectorAll("[data-action='close-dialog']").forEach((button) => button.addEventListener("click", closeTeamDialog));
-  document.querySelector("#teamForm")?.addEventListener("submit", submitTeamForm);
+  // 事件委托：在 app 容器上单次绑定 click 事件
+  app.onclick = (event) => {
+    const viewButton = event.target.closest("[data-view]");
+    if (viewButton && app.contains(viewButton)) {
+      state.view = viewButton.dataset.view;
+      saveAndRender();
+      return;
+    }
 
+    const actionElement = event.target.closest("[data-action]");
+    if (actionElement && app.contains(actionElement)) {
+      const action = actionElement.dataset.action;
+      if (action === "open-create") { openTeamDialog("create"); return; }
+      if (action === "open-edit") { openTeamDialog("edit", state.activeEntryId); return; }
+      if (action === "close-dialog") { closeTeamDialog(); return; }
+      if (action === "previous-entry") { navigateEntry(-1); return; }
+      if (action === "next-entry") { navigateEntry(1); return; }
+      if (action === "toggle-review") { toggleReview(); return; }
+      if (action === "delete-entry") { deleteEntry(); return; }
+      if (action === "reset-awards") { resetAwardCounts(true); return; }
+      if (action === "export") { exportWorkbook(); return; }
+      if (action === "clear-all") { clearAll(); return; }
+      return;
+    }
+
+    const entryButton = event.target.closest("[data-entry-id]");
+    if (entryButton && app.contains(entryButton)) {
+      state.activeEntryId = entryButton.dataset.entryId;
+      saveAndRender();
+      return;
+    }
+
+    const overviewGroupButton = event.target.closest("[data-overview-group]");
+    if (overviewGroupButton && app.contains(overviewGroupButton)) {
+      state.overviewGroup = overviewGroupButton.dataset.overviewGroup;
+      saveAndRender();
+      return;
+    }
+
+    const openEntryElement = event.target.closest("[data-open-entry]");
+    if (openEntryElement && app.contains(openEntryElement)) {
+      state.activeEntryId = openEntryElement.dataset.openEntry;
+      state.view = "entry";
+      saveAndRender();
+      return;
+    }
+  };
+
+  // 保留直接绑定：表单、文件输入、搜索、评分控件等需要精确事件处理的元素
+  document.querySelector("#teamForm")?.addEventListener("submit", submitTeamForm);
   document.querySelector("#rosterInput")?.addEventListener("change", importRoster);
   document.querySelectorAll("[data-roster-input]").forEach((input) => input.addEventListener("change", importRoster));
   document.querySelector("#queueSearch")?.addEventListener("input", updateQueueSearch);
@@ -554,36 +619,15 @@ function bindEvents() {
     state.queueStatus = event.target.value;
     saveAndRender();
   });
-  document.querySelectorAll("[data-entry-id]").forEach((button) => button.addEventListener("click", () => {
-    state.activeEntryId = button.dataset.entryId;
-    saveAndRender();
-  }));
 
   document.querySelectorAll("[data-score-radio]").forEach((control) => control.addEventListener("change", updateScoreRadio));
   document.querySelectorAll("[data-score-field]").forEach((control) => {
     control.addEventListener("input", stageScoreField);
     control.addEventListener("change", updateScoreField);
   });
-  document.querySelectorAll("[data-action='previous-entry']").forEach((button) => button.addEventListener("click", () => navigateEntry(-1)));
-  document.querySelectorAll("[data-action='next-entry']").forEach((button) => button.addEventListener("click", () => navigateEntry(1)));
-  document.querySelector("[data-action='toggle-review']")?.addEventListener("click", toggleReview);
-  document.querySelector("[data-action='delete-entry']")?.addEventListener("click", deleteEntry);
 
-  document.querySelectorAll("[data-overview-group]").forEach((button) => button.addEventListener("click", () => {
-    state.overviewGroup = button.dataset.overviewGroup;
-    saveAndRender();
-  }));
   document.querySelector("#overviewSearch")?.addEventListener("input", updateOverviewSearch);
-  document.querySelectorAll("[data-open-entry]").forEach((element) => element.addEventListener("click", () => {
-    state.activeEntryId = element.dataset.openEntry;
-    state.view = "entry";
-    saveAndRender();
-  }));
-
   document.querySelectorAll("[data-award-group]").forEach((control) => control.addEventListener("input", updateAwardCount));
-  document.querySelector("[data-action='reset-awards']")?.addEventListener("click", () => resetAwardCounts(true));
-  document.querySelector("[data-action='export']")?.addEventListener("click", exportWorkbook);
-  document.querySelector("[data-action='clear-all']")?.addEventListener("click", clearAll);
 }
 
 function openTeamDialog(mode, entryId = null) {
@@ -596,7 +640,7 @@ function openTeamDialog(mode, entryId = null) {
   const entry = mode === "edit" ? state.entries.find((candidate) => candidate.id === entryId) : null;
   form.reset();
   form.elements.group.value = entry?.group ?? (GROUPS.includes(state.queueGroup) ? state.queueGroup : GROUPS[0]);
-  for (const field of ["number", "teamName", "school", "studentA", "studentB", "coach", "note"]) {
+  for (const field of ["serial", "number", "city", "teamName", "school", "studentA", "studentB", "coach", "coachPhone", "note"]) {
     form.elements[field].value = entry?.[field] ?? "";
   }
   document.querySelector("#teamDialogTitle").textContent = mode === "edit" ? "编辑队伍" : "手工建队";
@@ -613,6 +657,7 @@ function submitTeamForm(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const fields = Object.fromEntries(new FormData(form).entries());
+  fields.teamName = normalizeText(fields.teamName) || manualTeamName(fields);
   const others = state.entries.filter((entry) => entry.id !== teamDialogContext.entryId);
   const issues = validateManualTeam(fields, others);
   if (issues.length) {
@@ -624,8 +669,13 @@ function submitTeamForm(event) {
   if (teamDialogContext.mode === "edit") {
     const entry = state.entries.find((candidate) => candidate.id === teamDialogContext.entryId);
     if (entry) {
-      for (const field of ["group", "number", "teamName", "school", "studentA", "studentB", "coach", "note"]) {
+      const previousSystemId = entry.systemId;
+      const previousNumber = entry.number;
+      for (const field of ["group", "serial", "number", "city", "teamName", "school", "studentA", "studentB", "coach", "coachPhone", "note"]) {
         entry[field] = normalizeText(fields[field]);
+      }
+      if (!previousSystemId || previousSystemId === previousNumber) {
+        entry.systemId = entry.number;
       }
       entry.reviewed = false;
     }
@@ -639,6 +689,15 @@ function submitTeamForm(event) {
   closeTeamDialog();
   syncAwardCounts();
   saveAndRender();
+}
+
+function manualTeamName(fields) {
+  const school = normalizeText(fields.school);
+  const students = [fields.studentA, fields.studentB].map(normalizeText).filter(Boolean).join("、");
+  if (school && students) {
+    return `${school}（${students}）`;
+  }
+  return school || students || normalizeText(fields.number);
 }
 
 async function importRoster(event) {
@@ -665,6 +724,11 @@ async function importRoster(event) {
       ...data.missingColumns.map((column) => ({ message: `缺少列：${column}` })),
       ...data.issues,
     ];
+    state.sourceWorkbook = {
+      filename: file.name,
+      base64,
+      importedAt: new Date().toISOString(),
+    };
     state.activeEntryId ??= state.entries[0]?.id ?? null;
     state.view = "entry";
     syncAwardCounts();
@@ -679,12 +743,12 @@ async function importRoster(event) {
 
 function updateQueueSearch(event) {
   state.query = event.target.value;
-  saveAndRender({ focusId: "queueSearch", cursorToEnd: true });
+  debouncedSaveAndRender({ focusId: "queueSearch", cursorToEnd: true });
 }
 
 function updateOverviewSearch(event) {
   state.overviewQuery = event.target.value;
-  saveAndRender({ focusId: "overviewSearch", cursorToEnd: true });
+  debouncedSaveAndRender({ focusId: "overviewSearch", cursorToEnd: true });
 }
 
 function updateScoreRadio(event) {
@@ -697,26 +761,22 @@ function updateScoreRadio(event) {
   entry.rounds[Number(control.dataset.round)].scores[control.dataset.task] = value === "" || value === "/" ? value : Number(value);
   entry.reviewed = false;
   syncAwardCounts();
-  saveAndRender({ focusId: control.id });
+  saveState();
+  refreshActiveScoreDisplay(entry);
 }
 
 function updateScoreField(event) {
   const control = event.currentTarget;
-  window.clearTimeout(scoreRenderTimer);
-  scoreRenderTimer = null;
   applyScoreField(control);
-  saveAndRender({ focusId: control.id });
+  saveState();
+  refreshActiveScoreDisplay();
 }
 
 function stageScoreField(event) {
   const control = event.currentTarget;
   applyScoreField(control);
   saveState();
-  window.clearTimeout(scoreRenderTimer);
-  scoreRenderTimer = window.setTimeout(() => {
-    scoreRenderTimer = null;
-    render({ focusId: control.id, cursorToEnd: true });
-  }, 180);
+  refreshActiveScoreDisplay();
 }
 
 function applyScoreField(control) {
@@ -731,6 +791,85 @@ function applyScoreField(control) {
   }
   entry.reviewed = false;
   syncAwardCounts();
+}
+
+function refreshActiveScoreDisplay(entry = state.entries.find((candidate) => candidate.id === state.activeEntryId)) {
+  if (!entry) {
+    return;
+  }
+  const status = getEntryWorkflowStatus(entry);
+  const calculated = calculateTeam(entry);
+
+  updateSummaryValue("round-0", calculated.complete || status.filled ? calculated.roundTotals[0] : "--");
+  updateSummaryValue("round-1", calculated.complete || status.filled ? calculated.roundTotals[1] : "--");
+  updateSummaryValue("total-score", calculated.complete ? calculated.totalScore : "--");
+  updateSummaryValue("total-seconds", calculated.complete ? calculated.totalSeconds : "--");
+
+  const paperStatus = document.querySelector(".paper-heading .status-badge");
+  if (paperStatus) {
+    paperStatus.outerHTML = statusBadge(status, true);
+  }
+  const paperCheck = document.querySelector(".paper-check");
+  if (paperCheck) {
+    paperCheck.innerHTML = paperCheckMessage(status);
+  }
+  refreshReviewButton(status);
+  refreshActiveQueueItem(status, calculated);
+  refreshProgressMetrics();
+}
+
+function updateSummaryValue(key, value) {
+  const element = document.querySelector(`[data-summary="${key}"] strong`);
+  if (element) {
+    element.textContent = value;
+  }
+}
+
+function refreshReviewButton(status) {
+  const button = document.querySelector("[data-action='toggle-review']");
+  if (!button) {
+    return;
+  }
+  const reviewDisabled = !["ready", "reviewed"].includes(status.key);
+  button.disabled = reviewDisabled;
+  button.classList.toggle("button-secondary", status.key === "reviewed");
+  button.classList.toggle("button-primary", status.key !== "reviewed");
+  button.textContent = status.key === "reviewed" ? "取消复核" : "标记已复核";
+}
+
+function refreshActiveQueueItem(status, calculated) {
+  const activeItem = document.querySelector(".queue-item.active");
+  if (!activeItem) {
+    return;
+  }
+  const badge = activeItem.querySelector(".status-badge");
+  if (badge) {
+    badge.outerHTML = statusBadge(status);
+  }
+  const score = activeItem.querySelector(".queue-item-side b");
+  if (score) {
+    score.textContent = calculated.complete ? calculated.totalScore : "--";
+  }
+}
+
+function refreshProgressMetrics() {
+  const statuses = state.entries.map((entry) => getEntryWorkflowStatus(entry));
+  const paperCompleteCount = state.entries.map(calculateTeam).filter((team) => team.complete).length;
+  const reviewedCount = statuses.filter((status) => status.key === "reviewed").length;
+  const pending = Math.max(0, state.entries.length - reviewedCount);
+  updateMetricValue("teams", state.entries.length);
+  updateMetricValue("complete", paperCompleteCount);
+  updateMetricValue("reviewed", reviewedCount);
+  updateMetricValue("pending", pending);
+  document.querySelector('[data-metric="pending"]')?.classList.toggle("warn", Boolean(pending));
+  document.querySelector('[data-metric="pending"]')?.classList.toggle("ok", !pending);
+}
+
+function updateMetricValue(key, value) {
+  const element = document.querySelector(`[data-metric="${key}"] strong`);
+  if (element) {
+    element.textContent = value;
+  }
 }
 
 function navigateEntry(offset) {
@@ -805,7 +944,11 @@ async function exportWorkbook() {
     const response = await fetch("/api/export", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ entries: state.entries, awardCountsByGroup: state.awardCountsByGroup }),
+      body: JSON.stringify({
+        entries: state.entries,
+        awardCountsByGroup: state.awardCountsByGroup,
+        sourceWorkbookBase64: state.sourceWorkbook?.base64 ?? "",
+      }),
     });
     if (!response.ok) {
       const data = await response.json();
@@ -815,12 +958,12 @@ async function exportWorkbook() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "道路工程成绩包.xlsx";
+    link.download = "26届省赛道路工程_成绩表.xlsx";
     document.body.append(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    toast("成绩包已生成");
+    toast("成绩表已生成");
   } catch (error) {
     toast(error.message);
   } finally {
@@ -830,7 +973,7 @@ async function exportWorkbook() {
 }
 
 function clearAll() {
-  if (!state.entries.length || !window.confirm("确定清空全部队伍、成绩和奖项设置吗？")) {
+  if (!state.entries.length || !window.confirm("确定删除全部队伍、成绩和奖项设置吗？此操作只清空本机保存的数据。")) {
     return;
   }
   state.entries = [];
@@ -838,6 +981,7 @@ function clearAll() {
   state.issues = [];
   state.awardCountsByGroup = {};
   state.awardManualGroups = {};
+  state.sourceWorkbook = null;
   state.query = "";
   state.overviewQuery = "";
   state.view = "entry";
@@ -865,6 +1009,11 @@ function hydrateState(saved) {
     issues: Array.isArray(source.issues) ? source.issues : [],
     awardCountsByGroup: source.awardCountsByGroup ?? {},
     awardManualGroups: source.awardManualGroups ?? {},
+    sourceWorkbook: source.sourceWorkbook?.base64 ? {
+      filename: source.sourceWorkbook.filename ?? "原成绩表.xlsx",
+      base64: source.sourceWorkbook.base64,
+      importedAt: source.sourceWorkbook.importedAt ?? "",
+    } : null,
     busy: false,
   };
 }
@@ -888,6 +1037,12 @@ function hydrateEntry(entry, index) {
     studentB: entry.studentB ?? "",
     coach: entry.coach ?? "",
     number: entry.number ?? "",
+    city: entry.city ?? "",
+    coachPhone: entry.coachPhone ?? "",
+    serial: entry.serial ?? "",
+    systemId: entry.systemId ?? "",
+    rawStudents: entry.rawStudents ?? "",
+    sourceSheet: entry.sourceSheet ?? "",
     note: entry.note ?? "",
     robotWeight: entry.robotWeight ?? "",
     rounds,
@@ -909,22 +1064,65 @@ function saveState() {
 }
 
 function saveAndRender(options = {}) {
+  const nextOptions = options.preserveScroll
+    ? { ...options, scrollState: captureScrollState() }
+    : options;
   saveState();
-  render(options);
+  render(nextOptions);
+}
+
+function captureScrollState() {
+  return {
+    windowX: window.scrollX,
+    windowY: window.scrollY,
+    containers: [".view-area", ".paper-stage", ".queue-list"].map((selector) => {
+      const element = document.querySelector(selector);
+      return element
+        ? { selector, scrollLeft: element.scrollLeft, scrollTop: element.scrollTop }
+        : null;
+    }).filter(Boolean),
+  };
+}
+
+function restoreViewport(options) {
+  window.setTimeout(() => {
+    restoreScrollState(options.scrollState);
+    restoreFocus(options);
+    restoreScrollState(options.scrollState);
+  }, 0);
+}
+
+function restoreScrollState(scrollState) {
+  if (!scrollState) {
+    return;
+  }
+  for (const item of scrollState.containers ?? []) {
+    const element = document.querySelector(item.selector);
+    if (element) {
+      element.scrollLeft = item.scrollLeft;
+      element.scrollTop = item.scrollTop;
+    }
+  }
+  window.scrollTo(scrollState.windowX ?? 0, scrollState.windowY ?? 0);
 }
 
 function restoreFocus(options) {
   if (!options.focusId) {
     return;
   }
-  window.setTimeout(() => {
-    const element = document.getElementById(options.focusId);
-    element?.focus();
-    if (options.cursorToEnd && typeof element?.setSelectionRange === "function") {
-      const end = element.value.length;
-      element.setSelectionRange(end, end);
-    }
-  }, 0);
+  const element = document.getElementById(options.focusId);
+  if (!element) {
+    return;
+  }
+  try {
+    element.focus({ preventScroll: true });
+  } catch {
+    element.focus();
+  }
+  if (options.cursorToEnd && typeof element.setSelectionRange === "function") {
+    const end = element.value.length;
+    element.setSelectionRange(end, end);
+  }
 }
 
 function statusBadge(status, large = false) {

@@ -401,6 +401,17 @@ p {
   font-size: 11px;
 }
 
+.queue-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.queue-header-actions .button {
+  min-height: 34px;
+}
+
 .queue-filters {
   display: grid;
   gap: 8px;
@@ -1086,6 +1097,15 @@ p {
   gap: 5px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.export-source-note {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .review-list {

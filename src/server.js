@@ -4,14 +4,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { SpreadsheetFile } from "@oai/artifact-tool";
-import { GROUPS, ROAD_TASKS } from "./core.js";
-import { createRosterTemplateWorkbook, createScoreWorkbook, readRosterWorkbook } from "./excel.js";
+import { GROUPS, OFFICIAL_SCORE_OUTPUT_FILENAME, ROAD_TASKS } from "./core.js";
+import { createOfficialScoreWorkbook, createRosterTemplateWorkbook, readRosterWorkbook } from "./excel.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, "..");
 const defaultPublicDir = path.join(projectRoot, "public");
 const xlsxMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const configJson = JSON.stringify({ groups: GROUPS, tasks: ROAD_TASKS });
+let cachedCoreJs = null;
 
 export function createRequestHandler({ publicDir = defaultPublicDir, tmpDir = path.join(projectRoot, "tmp", "uploads") } = {}) {
   return async (request, response) => {
@@ -19,13 +21,18 @@ export function createRequestHandler({ publicDir = defaultPublicDir, tmpDir = pa
       const url = new URL(request.url, "http://localhost");
 
       if (request.method === "GET" && url.pathname === "/api/config") {
-        return sendJson(response, 200, { groups: GROUPS, tasks: ROAD_TASKS });
+        response.writeHead(200, {
+          "content-type": "application/json; charset=utf-8",
+          "content-length": Buffer.byteLength(configJson),
+        });
+        response.end(configJson);
+        return;
       }
 
       if (request.method === "GET" && url.pathname === "/shared/core.js") {
-        const source = await fs.readFile(path.join(projectRoot, "src", "core.js"));
+        cachedCoreJs ??= await fs.readFile(path.join(projectRoot, "src", "core.js"));
         response.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
-        response.end(source);
+        response.end(cachedCoreJs);
         return;
       }
 
@@ -55,12 +62,26 @@ export function createRequestHandler({ publicDir = defaultPublicDir, tmpDir = pa
 
       if (request.method === "POST" && url.pathname === "/api/export") {
         const payload = await readJsonBody(request);
-        const workbook = await createScoreWorkbook({
-          entries: Array.isArray(payload.entries) ? payload.entries : [],
-          awardCountsByGroup: payload.awardCountsByGroup ?? {},
-        });
-        const output = await SpreadsheetFile.exportXlsx(workbook);
-        await sendXlsx(response, output, `道路工程成绩包-${dateStamp()}.xlsx`, tmpDir);
+        await fs.mkdir(tmpDir, { recursive: true });
+        const templatePath = payload.sourceWorkbookBase64
+          ? path.join(tmpDir, `${randomUUID()}-source-score-template.xlsx`)
+          : "";
+        if (templatePath) {
+          await fs.writeFile(templatePath, Buffer.from(stripDataUrlPrefix(payload.sourceWorkbookBase64), "base64"));
+        }
+        try {
+          const workbook = await createOfficialScoreWorkbook({
+            entries: Array.isArray(payload.entries) ? payload.entries : [],
+            awardCountsByGroup: payload.awardCountsByGroup ?? {},
+            templatePath,
+          });
+          const output = await SpreadsheetFile.exportXlsx(workbook);
+          await sendXlsx(response, output, OFFICIAL_SCORE_OUTPUT_FILENAME, tmpDir);
+        } finally {
+          if (templatePath) {
+            await fs.unlink(templatePath).catch(() => {});
+          }
+        }
         return;
       }
 
@@ -70,7 +91,12 @@ export function createRequestHandler({ publicDir = defaultPublicDir, tmpDir = pa
 
       sendJson(response, 405, { error: "Method Not Allowed" });
     } catch (error) {
-      sendJson(response, 500, { error: error.message || "服务器处理失败" });
+      const status = error.statusCode || 500;
+      if (response.headersSent) {
+        response.end();
+      } else {
+        sendJson(response, status, { error: error.message || "服务器处理失败" });
+      }
     }
   };
 }
@@ -87,13 +113,28 @@ if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   startServer();
 }
 
-async function readJsonBody(request) {
+async function readJsonBody(request, maxBytes = 2 * 1024 * 1024) {
   const chunks = [];
+  let size = 0;
   for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      request.destroy();
+      const error = new Error("请求体过大，最大允许 2MB");
+      error.statusCode = 413;
+      throw error;
+    }
     chunks.push(chunk);
   }
   const text = Buffer.concat(chunks).toString("utf8");
-  return text ? JSON.parse(text) : {};
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    const error = new Error("无效的 JSON 格式");
+    error.statusCode = 400;
+    throw error;
+  }
 }
 
 async function sendXlsx(response, fileBlob, filename, tmpDir) {

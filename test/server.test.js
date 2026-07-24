@@ -98,7 +98,7 @@ test("exports a score workbook from posted entries", async () => {
 
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("content-type"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    assert.match(decodeURIComponent(response.headers.get("content-disposition")), /道路工程成绩包/);
+    assert.match(decodeURIComponent(response.headers.get("content-disposition")), /26届省赛道路工程_成绩表/);
     assert(body.length > 1000);
   } finally {
     await close();
