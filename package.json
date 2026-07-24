@@ -6,6 +6,11 @@
   "scripts": {
     "build": "node scripts/build-site.js",
     "test": "node --test",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.114.0"
   }
 }
