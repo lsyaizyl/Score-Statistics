@@ -39,7 +39,7 @@ test("builds a Sites worker that serves the app and cloud Excel APIs", async () 
           robotWeight: 1.2,
           rounds: [
             {
-              seconds: 100,
+              seconds: 82.33,
               scores: {
                 materialRecovery: "/",
                 serviceArea: "/",
@@ -51,7 +51,7 @@ test("builds a Sites worker that serves the app and cloud Excel APIs", async () 
               },
             },
             {
-              seconds: 110,
+              seconds: 11.02,
               scores: {
                 materialRecovery: "/",
                 serviceArea: "/",
@@ -85,6 +85,13 @@ test("builds a Sites worker that serves the app and cloud Excel APIs", async () 
   assert(exportedTable.ndjson.includes("G01"));
   assert(exportedTable.ndjson.includes("D2026001"));
   assert(exportedTable.ndjson.includes("一等奖"));
+  assert(exportedTable.ndjson.includes("12233"));
+  assert(exportedTable.ndjson.includes("13335"));
+  const outputPath = path.join(tmpDir, "site-worker-official-output.xlsx");
+  await fs.writeFile(outputPath, Buffer.from(exportedBytes));
+  const xmlByPath = await readXlsxXml(outputPath);
+  assert(Object.values(xmlByPath).some((xml) => xml.includes("G3+I3")));
+  assert(Object.values(xmlByPath).some((xml) => xml.includes("LET(T,(H3-INT(H3/10000)*4000)+(J3-INT(J3/10000)*4000),INT(T/6000)*10000+MOD(T,6000))")));
 
   const rosterBase64 = await compressedRosterWorkbookBase64();
   const rosterResponse = await worker.default.fetch(new Request("https://example.test/api/roster", {
@@ -144,10 +151,22 @@ async function officialTemplateWorkbookBase64() {
       ["出场\n序号", "系统编号", "地市", "学校名称", "参赛选手", "教练员", "第一轮\n分数", "第一轮\n完成时间", "第二轮\n分数", "第二轮\n完成时间", "重量", "总成绩", "总用时", "名次", "等次"],
       ["", systemId, city, school, students, coach, "", "", "", "", "", "", "", "", ""],
     ];
+    sheet.getRange("L3").formulas = [["=G3+I3"]];
+    sheet.getRange("M3").formulas = [["=LET(T,(H3-INT(H3/10000)*4000)+(J3-INT(J3/10000)*4000),INT(T/6000)*10000+MOD(T,6000))"]];
   }
   const file = await SpreadsheetFile.exportXlsx(workbook);
   const filePath = path.join(tmpDir, "official-template.xlsx");
   await file.save(filePath);
   const bytes = await fs.readFile(filePath);
   return Buffer.from(bytes).toString("base64");
+}
+
+async function readXlsxXml(inputPath) {
+  const output = {};
+  const { stdout } = await execFileAsync("tar", ["-tf", inputPath], { maxBuffer: 2_000_000 });
+  for (const name of stdout.split(/\r?\n/).filter((item) => /^xl\/worksheets\/sheet\d+\.xml$/.test(item))) {
+    const extracted = await execFileAsync("tar", ["-xOf", inputPath, name], { maxBuffer: 4_000_000 });
+    output[name] = extracted.stdout;
+  }
+  return output;
 }

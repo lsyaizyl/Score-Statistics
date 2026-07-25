@@ -347,12 +347,30 @@ function officialCellXml(value, rowNumber, columnNumber, style, prefix = "", row
     return retargetCellXml(rowStyle.cellXmls.get(1), ref);
   }
   if (rowNumber >= 3 && columnNumber === 12) {
+    if (rowStyle?.cellXmls?.has(columnNumber)) {
+      return formulaCellWithCachedValue(rowStyle.cellXmls.get(columnNumber), value);
+    }
     return formulaCellXml(ref, styleAttr, officialTotalScoreFormula(rowNumber), value, prefix);
   }
   if (rowNumber >= 3 && columnNumber === 13) {
+    if (rowStyle?.cellXmls?.has(columnNumber)) {
+      return formulaCellWithCachedValue(rowStyle.cellXmls.get(columnNumber), value);
+    }
     return formulaCellXml(ref, styleAttr, officialTotalTimeFormula(rowNumber), value, prefix);
   }
   return valueCellXml(ref, styleAttr, value, prefix);
+}
+
+function formulaCellWithCachedValue(cellXml, cachedValue) {
+  if (!/<(?:[\w.-]+:)?f\b/.test(cellXml)) {
+    return cellXml;
+  }
+  const prefix = cellXml.match(/^<((?:[\w.-]+:)?)c\b/)?.[1] ?? "";
+  const value = cachedValue === "" || cachedValue === null || cachedValue === undefined ? "" : `<${prefix}v>${Number(cachedValue)}</${prefix}v>`;
+  if (/<(?:[\w.-]+:)?v>[\s\S]*?<\/(?:[\w.-]+:)?v>/.test(cellXml)) {
+    return cellXml.replace(/<(?:[\w.-]+:)?v>[\s\S]*?<\/(?:[\w.-]+:)?v>/, value);
+  }
+  return cellXml.replace(/<\/((?:[\w.-]+:)?c)>$/, `${value}</$1>`);
 }
 
 function formulaCellXml(ref, styleAttr, formula, cachedValue, prefix = "") {
@@ -379,14 +397,12 @@ function retargetCellXml(cellXml, ref) {
 }
 
 function officialTotalScoreFormula(row) {
-  return `IF(COUNTA(G${row},I${row})=0,"",G${row}+I${row})`;
+  return `G${row}+I${row}`;
 }
 
 function officialTotalTimeFormula(row) {
-  const first = `(H${row}-INT(H${row}/10000)*4000)`;
-  const second = `(J${row}-INT(J${row}/10000)*4000)`;
-  const total = `(${first}+${second})`;
-  return `IF(COUNTA(H${row},J${row})=0,"",INT(${total}/6000)*10000+MOD(${total},6000))`;
+  const total = `(H${row}-INT(H${row}/10000)*4000)+(J${row}-INT(J${row}/10000)*4000)`;
+  return `_xlfn.LET(_xlpm.T,${total},INT(_xlpm.T/6000)*10000+MOD(_xlpm.T,6000))`;
 }
 
 function summaryRow(team) {

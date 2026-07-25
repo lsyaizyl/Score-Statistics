@@ -230,8 +230,8 @@ test("builds official score sheet rows with draw numbers and template system ids
     coach: "丙",
     robotWeight: 1.25,
     rounds: [
-      completeRound(82, { tunnel: 50, autoCharging: 50 }),
-      completeRound(11, { tunnel: 50 }),
+      completeRound(82.33, { tunnel: 50, autoCharging: 50 }),
+      completeRound(11.02, { tunnel: 50 }),
     ],
   });
   const sheets = buildOfficialScoreSheets(
@@ -248,16 +248,17 @@ test("builds official score sheet rows with draw numbers and template system ids
   );
   const row = sheets.find((sheet) => sheet.name === "小学组成绩表").rows[2];
 
-  assert.equal(secondsToOfficialTime(82), 12200);
+  assert.equal(entry.totalSeconds, 93.35);
+  assert.equal(secondsToOfficialTime(82.33), 12233);
   assert.equal(row[0], "G01");
   assert.equal(row[1], "D2026001");
   assert.equal(row[6], 100);
-  assert.equal(row[7], 12200);
+  assert.equal(row[7], 12233);
   assert.equal(row[8], 50);
-  assert.equal(row[9], 1100);
+  assert.equal(row[9], 1102);
   assert.equal(row[10], 1.25);
   assert.equal(row[11], 150);
-  assert.equal(row[12], 13300);
+  assert.equal(row[12], 13335);
   assert.equal(row[13], 1);
   assert.equal(row[14], "一等奖");
 });

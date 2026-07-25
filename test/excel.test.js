@@ -155,6 +155,8 @@ test("fills official province score sheets using a template workbook", async () 
     ["出场\n序号", "系统编号", "地市", "学校名称", "参赛选手", "教练员", "第一轮\n分数", "第一轮\n完成时间", "第二轮\n分数", "第二轮\n完成时间", "重量", "总成绩", "总用时", "名次", "等次"],
     ["", "D2026001", "珠海市", "甲校", "甲、乙", "丙", "", "", "", "", "", "", "", "", ""],
   ];
+  sheet.getRange("L3").formulas = [["=G3+I3"]];
+  sheet.getRange("M3").formulas = [["=LET(T,(H3-INT(H3/10000)*4000)+(J3-INT(J3/10000)*4000),INT(T/6000)*10000+MOD(T,6000))"]];
   template.worksheets.add("初中组成绩表").getRange("A1:O2").values = [
     ["旧标题", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
     ["出场\n序号", "系统编号", "地市", "学校名称", "参赛选手", "教练员", "第一轮\n分数", "第一轮\n完成时间", "第二轮\n分数", "第二轮\n完成时间", "重量", "总成绩", "总用时", "名次", "等次"],
@@ -182,8 +184,8 @@ test("fills official province score sheets using a template workbook", async () 
         coach: "丙",
         robotWeight: 1.25,
         rounds: [
-          completeRound(82, { tunnel: 50, autoCharging: 50 }),
-          completeRound(11, { tunnel: 50 }),
+          completeRound(82.33, { tunnel: 50, autoCharging: 50 }),
+          completeRound(11.02, { tunnel: 50 }),
         ],
       },
     ],
@@ -202,5 +204,26 @@ test("fills official province score sheets using a template workbook", async () 
   assert(table.ndjson.includes("G01"));
   assert(table.ndjson.includes("D2026001"));
   assert(table.ndjson.includes("一等奖"));
-  assert(table.ndjson.includes("12200"));
+  assert(table.ndjson.includes("12233"));
+  assert(table.ndjson.includes("13335"));
+
+  const output = await SpreadsheetFile.exportXlsx(workbook);
+  const outputPath = path.join(tmpDir, "official-output.xlsx");
+  await output.save(outputPath);
+  const xmlByPath = await readXlsxXml(outputPath);
+  assert(Object.values(xmlByPath).some((xml) => xml.includes("G3+I3")));
+  assert(Object.values(xmlByPath).some((xml) => xml.includes("LET(T,(H3-INT(H3/10000)*4000)+(J3-INT(J3/10000)*4000),INT(T/6000)*10000+MOD(T,6000))")));
 });
+
+async function readXlsxXml(inputPath) {
+  const output = {};
+  const childProcess = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFile = promisify(childProcess.execFile);
+  const { stdout } = await execFile("tar", ["-tf", inputPath], { maxBuffer: 2_000_000 });
+  for (const name of stdout.split(/\r?\n/).filter((item) => /^xl\/worksheets\/sheet\d+\.xml$/.test(item))) {
+    const extracted = await execFile("tar", ["-xOf", inputPath, name], { maxBuffer: 4_000_000 });
+    output[name] = extracted.stdout;
+  }
+  return output;
+}

@@ -353,14 +353,27 @@ function writeOfficialScoreSheet(sheet, scoreSheet, preserveTemplate) {
   const rows = scoreSheet.rows;
   const colCount = OFFICIAL_SCORE_HEADERS.length;
   const normalizedRows = rows.map((row) => row.concat(Array.from({ length: colCount - row.length }, () => "")));
-  sheet.getRangeByIndexes(0, 0, normalizedRows.length, colCount).values = normalizedRows;
-  writeOfficialScoreFormulas(sheet, normalizedRows.length);
 
   if (!preserveTemplate) {
+    sheet.getRangeByIndexes(0, 0, normalizedRows.length, colCount).values = normalizedRows;
+    writeOfficialScoreFormulas(sheet, normalizedRows.length);
     styleOfficialScoreSheet(sheet, scoreSheet.group, normalizedRows.length);
   } else {
-    sheet.getRange("A1").values = [[officialScoreTitle(scoreSheet.group)]];
+    writeOfficialTemplateData(sheet, normalizedRows);
   }
+}
+
+function writeOfficialTemplateData(sheet, rows) {
+  if (!rows.length) {
+    return;
+  }
+  sheet.getRange("A1").values = [[rows[0][0]]];
+  if (rows.length <= 2) {
+    return;
+  }
+  const dataRows = rows.slice(2);
+  sheet.getRangeByIndexes(2, 0, dataRows.length, 11).values = dataRows.map((row) => row.slice(0, 11));
+  sheet.getRangeByIndexes(2, 13, dataRows.length, 2).values = dataRows.map((row) => row.slice(13, 15));
 }
 
 function writeOfficialScoreFormulas(sheet, rowCount) {
@@ -375,14 +388,12 @@ function writeOfficialScoreFormulas(sheet, rowCount) {
 }
 
 function officialTotalScoreFormula(row) {
-  return `=IF(COUNTA(G${row},I${row})=0,"",G${row}+I${row})`;
+  return `=G${row}+I${row}`;
 }
 
 function officialTotalTimeFormula(row) {
-  const first = `(H${row}-INT(H${row}/10000)*4000)`;
-  const second = `(J${row}-INT(J${row}/10000)*4000)`;
-  const total = `(${first}+${second})`;
-  return `=IF(COUNTA(H${row},J${row})=0,"",INT(${total}/6000)*10000+MOD(${total},6000))`;
+  const total = `(H${row}-INT(H${row}/10000)*4000)+(J${row}-INT(J${row}/10000)*4000)`;
+  return `=LET(T,${total},INT(T/6000)*10000+MOD(T,6000))`;
 }
 
 function styleOfficialScoreSheet(sheet, group, rowCount) {

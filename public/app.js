@@ -336,7 +336,7 @@ function timeRow(entry) {
       ${[0, 1].map((roundIndex) => `
         <td>
           <label class="time-input">
-            <input id="round-${roundIndex}-seconds" data-score-field data-round="${roundIndex}" data-field="seconds" type="number" min="0" max="180" step="1" value="${escapeAttr(entry.rounds[roundIndex].seconds)}">
+            <input id="round-${roundIndex}-seconds" data-score-field data-round="${roundIndex}" data-field="seconds" type="number" min="0" max="180" step="0.01" inputmode="decimal" value="${escapeAttr(entry.rounds[roundIndex].seconds)}">
             <span>秒</span>
           </label>
         </td>

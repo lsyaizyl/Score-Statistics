@@ -405,14 +405,14 @@ export function calculateTeam(entry) {
       scores[task.key] = allowedScores.includes(toNumber(rawScore)) ? toNumber(rawScore) : 0;
     }
     return {
-      seconds: toNumber(sourceRound.seconds),
+      seconds: secondsFromCentiseconds(sourceRound.seconds),
       scores,
       total: ROAD_TASKS.reduce((sum, task) => sum + scores[task.key], 0),
     };
   });
   const roundTotals = rounds.map((round) => round.total);
   const totalScore = roundTotals[0] + roundTotals[1];
-  const totalSeconds = rounds[0].seconds + rounds[1].seconds;
+  const totalSeconds = secondsFromCentiseconds(rounds[0].seconds + rounds[1].seconds);
   const parsedWeight = toNumber(entry.robotWeight, Number.NaN);
   const robotWeight = Number.isFinite(parsedWeight) && parsedWeight > 0 ? parsedWeight : "";
 
@@ -689,16 +689,25 @@ export function buildOfficialScoreRows(group, result, existingRows = []) {
 }
 
 export function secondsToOfficialTime(value) {
-  const seconds = Number(value);
-  if (!Number.isFinite(seconds) || seconds < 0) {
+  const centiseconds = centisecondsFromSeconds(value);
+  if (!Number.isFinite(centiseconds) || centiseconds < 0) {
     return "";
   }
-  const centiseconds = Math.round(seconds * 100);
   const minutes = Math.floor(centiseconds / 6000);
   const remainder = centiseconds % 6000;
   const secondPart = Math.floor(remainder / 100);
   const hundredths = remainder % 100;
   return minutes * 10000 + secondPart * 100 + hundredths;
+}
+
+function secondsFromCentiseconds(value) {
+  const centiseconds = centisecondsFromSeconds(toNumber(value));
+  return Number.isFinite(centiseconds) ? centiseconds / 100 : 0;
+}
+
+function centisecondsFromSeconds(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? Math.round((seconds + Number.EPSILON) * 100) : Number.NaN;
 }
 
 export function officialScoreTitle(group) {
@@ -771,7 +780,8 @@ function officialScoreDataRow(team, existingRow = []) {
   const students = teamStudentsText(team);
   const firstRoundTime = complete ? secondsToOfficialTime(team.rounds?.[0]?.seconds) : "";
   const secondRoundTime = complete ? secondsToOfficialTime(team.rounds?.[1]?.seconds) : "";
-  const totalTime = complete ? secondsToOfficialTime(team.totalSeconds) : "";
+  const totalScore = complete ? team.totalScore ?? 0 : 0;
+  const totalTime = complete ? secondsToOfficialTime(team.totalSeconds) : 0;
 
   return [
     team ? normalizeText(team.number) : normalizeText(existingRow[0]),
@@ -785,7 +795,7 @@ function officialScoreDataRow(team, existingRow = []) {
     complete ? team.roundTotals?.[1] ?? "" : "",
     secondRoundTime,
     team ? team.robotWeight ?? "" : "",
-    complete ? team.totalScore ?? "" : "",
+    totalScore,
     totalTime,
     complete ? team.rank ?? "" : "",
     complete ? team.award ?? "" : "",
