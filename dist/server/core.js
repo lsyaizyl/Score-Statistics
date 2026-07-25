@@ -434,7 +434,7 @@ export function calculateTeam(entry) {
 export function isEntryScoreComplete(entry) {
   return [0, 1].every((roundIndex) => {
     const round = entry.rounds?.[roundIndex];
-    const seconds = Number(round?.seconds);
+    const seconds = parsePaperTimeToSeconds(round?.seconds);
     if (round?.seconds === "" || round?.seconds === undefined || round?.seconds === null
       || !Number.isFinite(seconds) || seconds < 0 || seconds > 180) {
       return false;
@@ -471,9 +471,9 @@ export function validateScoreEntry(entry) {
     if (round.seconds === "" || round.seconds === undefined || round.seconds === null) {
       issues.push({ type: "missing-time", field: `rounds.${roundIndex}.seconds`, message: `第${roundIndex + 1}轮用时不能为空` });
     } else {
-      const seconds = Number(round.seconds);
+      const seconds = parsePaperTimeToSeconds(round.seconds);
       if (!Number.isFinite(seconds) || seconds < 0 || seconds > 180) {
-        issues.push({ type: "invalid-time", field: `rounds.${roundIndex}.seconds`, message: `第${roundIndex + 1}轮用时必须在0-180秒之间` });
+        issues.push({ type: "invalid-time", field: `rounds.${roundIndex}.seconds`, message: `第${roundIndex + 1}轮用时必须为 0'00''00 格式，且在 0'00''00 - 3'00''00 之间` });
       }
     }
 
@@ -689,7 +689,7 @@ export function buildOfficialScoreRows(group, result, existingRows = []) {
 }
 
 export function secondsToOfficialTime(value) {
-  const centiseconds = centisecondsFromSeconds(value);
+  const centiseconds = centisecondsFromTimeValue(value);
   if (!Number.isFinite(centiseconds) || centiseconds < 0) {
     return "";
   }
@@ -700,9 +700,83 @@ export function secondsToOfficialTime(value) {
   return minutes * 10000 + secondPart * 100 + hundredths;
 }
 
+export function parsePaperTimeToSeconds(value) {
+  const centiseconds = centisecondsFromTimeValue(value);
+  return Number.isFinite(centiseconds) ? centiseconds / 100 : Number.NaN;
+}
+
+export function formatPaperTime(value) {
+  const centiseconds = centisecondsFromTimeValue(value);
+  if (!Number.isFinite(centiseconds) || centiseconds < 0) {
+    return "";
+  }
+  const minutes = Math.floor(centiseconds / 6000);
+  const remainder = centiseconds % 6000;
+  const seconds = Math.floor(remainder / 100);
+  const hundredths = remainder % 100;
+  return `${minutes}'${String(seconds).padStart(2, "0")}''${String(hundredths).padStart(2, "0")}`;
+}
+
 function secondsFromCentiseconds(value) {
-  const centiseconds = centisecondsFromSeconds(toNumber(value));
+  const centiseconds = centisecondsFromTimeValue(value);
   return Number.isFinite(centiseconds) ? centiseconds / 100 : 0;
+}
+
+function centisecondsFromTimeValue(value) {
+  const paperTime = paperTimeToCentiseconds(value);
+  if (Number.isFinite(paperTime)) {
+    return paperTime;
+  }
+  return centisecondsFromSeconds(toNumber(value, Number.NaN));
+}
+
+function paperTimeToCentiseconds(value) {
+  if (value === null || value === undefined || value === "") {
+    return Number.NaN;
+  }
+  if (typeof value === "number") {
+    return Number.NaN;
+  }
+  const text = normalizeText(value)
+    .replace(/[’‘′]/g, "'")
+    .replace(/[“”″]/g, "''")
+    .replace(/毫秒|毫米|厘秒|百分秒/g, "")
+    .replace(/分/g, "'")
+    .replace(/秒/g, "''")
+    .replace(/\s+/g, "");
+  if (!text) {
+    return Number.NaN;
+  }
+
+  const compactMatch = text.match(/^\d{4,5}$/);
+  if (compactMatch) {
+    const padded = text.padStart(5, "0");
+    return paperTimePartsToCentiseconds(
+      Number(padded.slice(0, -4)),
+      Number(padded.slice(-4, -2)),
+      Number(padded.slice(-2)),
+    );
+  }
+
+  const textMatch = text.match(/^(\d+)'(\d{1,2})''(\d{1,2})$/);
+  if (textMatch) {
+    return paperTimePartsToCentiseconds(Number(textMatch[1]), Number(textMatch[2]), Number(textMatch[3]));
+  }
+
+  const colonMatch = text.match(/^(\d+):(\d{1,2})[:.](\d{1,2})$/);
+  if (colonMatch) {
+    return paperTimePartsToCentiseconds(Number(colonMatch[1]), Number(colonMatch[2]), Number(colonMatch[3]));
+  }
+
+  return Number.NaN;
+}
+
+function paperTimePartsToCentiseconds(minutes, seconds, hundredths) {
+  if (![minutes, seconds, hundredths].every(Number.isInteger)
+    || minutes < 0 || seconds < 0 || seconds > 59 || hundredths < 0 || hundredths > 99) {
+    return Number.NaN;
+  }
+  return minutes * 6000 + seconds * 100 + hundredths;
 }
 
 function centisecondsFromSeconds(value) {

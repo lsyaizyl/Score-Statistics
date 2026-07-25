@@ -724,7 +724,7 @@ p {
 .time-input {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   color: var(--muted);
   font-size: 12px;
 }
@@ -742,7 +742,12 @@ p {
 }
 
 .time-input input {
-  width: 96px;
+  width: 112px;
+  text-align: center;
+}
+
+.time-format-label {
+  white-space: nowrap;
 }
 
 .score-summary {

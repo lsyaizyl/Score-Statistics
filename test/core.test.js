@@ -16,6 +16,8 @@ import {
   suggestAwardCounts,
   splitRosterNames,
   assignAwards,
+  formatPaperTime,
+  parsePaperTimeToSeconds,
   secondsToOfficialTime,
 } from "../src/core.js";
 
@@ -261,6 +263,55 @@ test("builds official score sheet rows with draw numbers and template system ids
   assert.equal(row[12], 13335);
   assert.equal(row[13], 1);
   assert.equal(row[14], "一等奖");
+});
+
+test("parses paper time codes without breaking legacy seconds values", () => {
+  assert.equal(parsePaperTimeToSeconds("0'00''00"), 0);
+  assert.equal(parsePaperTimeToSeconds("1'22''33"), 82.33);
+  assert.equal(parsePaperTimeToSeconds("0'11''02"), 11.02);
+  assert.equal(parsePaperTimeToSeconds("12233"), 82.33);
+  assert.equal(parsePaperTimeToSeconds("1102"), 11.02);
+  assert.equal(parsePaperTimeToSeconds("180"), 180);
+  assert.equal(parsePaperTimeToSeconds(180), 180);
+  assert.equal(formatPaperTime(82.33), "1'22''33");
+  assert.equal(formatPaperTime("0'11''02"), "0'11''02");
+  assert.equal(formatPaperTime("180"), "3'00''00");
+  assert(Number.isNaN(parsePaperTimeToSeconds("0'60''00")));
+  assert.equal(parsePaperTimeToSeconds("3'00''01"), 180.01);
+  assert(validateScoreEntry({
+    teamName: "超时队",
+    group: "小学组",
+    robotWeight: 1,
+    rounds: [completeRound("3'00''01"), completeRound("0'00''00")],
+  }).some((issue) => issue.type === "invalid-time"));
+});
+
+test("calculates and exports official rows from paper time-code input", () => {
+  const entry = calculateTeam({
+    id: "小学组-D2026001",
+    group: "小学组",
+    number: "G01",
+    teamName: "甲校（甲、乙）",
+    city: "珠海市",
+    school: "甲校",
+    rawStudents: "甲、乙",
+    coach: "丙",
+    robotWeight: 1.25,
+    rounds: [
+      completeRound("1'22''33", { tunnel: 50, autoCharging: 50 }),
+      completeRound("0'11''02", { tunnel: 50 }),
+    ],
+  });
+  const sheets = buildOfficialScoreSheets(
+    [assignAwards(rankTeams([entry]), { first: 1, second: 0, third: 0 })[0]],
+    { 小学组: { first: 1, second: 0, third: 0 } },
+  );
+  const row = sheets.find((sheet) => sheet.name === "小学组成绩表").rows[2];
+
+  assert.equal(entry.totalSeconds, 93.35);
+  assert.equal(row[7], 12233);
+  assert.equal(row[9], 1102);
+  assert.equal(row[12], 13335);
 });
 
 test("creates a manual team from the minimum fields and rejects duplicates within a group", () => {

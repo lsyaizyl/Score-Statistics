@@ -6,9 +6,11 @@ import {
   calculateTeam,
   createManualEntry,
   emptyRound,
+  formatPaperTime,
   getEntryWorkflowStatus,
   mergeRosterEntries,
   normalizeText,
+  parsePaperTimeToSeconds,
   reconcileAwardCounts,
   suggestAwardCounts,
   validateManualTeam,
@@ -332,17 +334,21 @@ function timeRow(entry) {
   return `
     <tr class="time-row">
       <td class="task-name"><strong>比赛用时</strong></td>
-      <td class="allowed-scores">0 - 180 秒</td>
+      <td class="allowed-scores">0'00''00 - 3'00''00</td>
       ${[0, 1].map((roundIndex) => `
         <td>
           <label class="time-input">
-            <input id="round-${roundIndex}-seconds" data-score-field data-round="${roundIndex}" data-field="seconds" type="number" min="0" max="180" step="0.01" inputmode="decimal" value="${escapeAttr(entry.rounds[roundIndex].seconds)}">
-            <span>秒</span>
+            <input id="round-${roundIndex}-seconds" class="paper-timecode-input" data-score-field data-round="${roundIndex}" data-field="seconds" type="text" inputmode="numeric" autocomplete="off" placeholder="0'00''00" value="${escapeAttr(timeInputValue(entry.rounds[roundIndex].seconds))}" aria-label="第${roundIndex + 1}轮比赛用时，格式 0'00''00" title="格式：0'00''00">
+            <span class="time-format-label">分'秒''百分秒</span>
           </label>
         </td>
       `).join("")}
     </tr>
   `;
+}
+
+function timeInputValue(value) {
+  return formatPaperTime(value) || normalizeText(value);
 }
 
 function summaryValue(label, value, unit, className = "", key = "") {
@@ -768,6 +774,7 @@ function updateScoreRadio(event) {
 function updateScoreField(event) {
   const control = event.currentTarget;
   applyScoreField(control);
+  normalizeTimeField(control);
   saveState();
   refreshActiveScoreDisplay();
 }
@@ -791,6 +798,23 @@ function applyScoreField(control) {
   }
   entry.reviewed = false;
   syncAwardCounts();
+}
+
+function normalizeTimeField(control) {
+  if (control.dataset.field !== "seconds") {
+    return;
+  }
+  const entry = state.entries.find((candidate) => candidate.id === state.activeEntryId);
+  if (!entry) {
+    return;
+  }
+  const seconds = parsePaperTimeToSeconds(control.value);
+  if (!Number.isFinite(seconds) || seconds < 0 || seconds > 180) {
+    return;
+  }
+  const normalizedSeconds = Math.round((seconds + Number.EPSILON) * 100) / 100;
+  entry.rounds[Number(control.dataset.round)].seconds = normalizedSeconds;
+  control.value = formatPaperTime(normalizedSeconds);
 }
 
 function refreshActiveScoreDisplay(entry = state.entries.find((candidate) => candidate.id === state.activeEntryId)) {
